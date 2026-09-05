@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: io-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: io
+      POSTGRES_USER: io
+      # Local development only. Production credentials come from the platform's
+      # environment variables and are never committed.
+      POSTGRES_PASSWORD: io
+    ports:
+      - "5432:5432"
+    volumes:
+      - io-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U io -d io"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  io-postgres-data:
