@@ -2,6 +2,9 @@ package com.tictac.io.common
 
 import com.tictac.io.authentication.EmailAlreadyRegisteredException
 import com.tictac.io.authentication.InvalidCredentialsException
+import com.tictac.io.authentication.oauth.InvalidLoginCodeException
+import com.tictac.io.authentication.oauth.InvalidOAuthIdentityException
+import com.tictac.io.authentication.oauth.OAuthLinkingNotAllowedException
 import com.tictac.io.authentication.token.InvalidRefreshTokenException
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpHeaders
@@ -67,6 +70,28 @@ class ApiExceptionHandler : ResponseEntityExceptionHandler() {
     fun handleInvalidRefreshToken(ex: InvalidRefreshTokenException): ProblemDetail =
         ProblemDetail.forStatusAndDetail(HttpStatus.UNAUTHORIZED, "Refresh token is invalid or has expired").apply {
             title = "Authentication failed"
+        }
+
+    /** Unknown, expired or already-used OAuth login code - all indistinguishable. */
+    @ExceptionHandler(InvalidLoginCodeException::class)
+    fun handleInvalidLoginCode(ex: InvalidLoginCodeException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.UNAUTHORIZED, "Login code is invalid or has expired").apply {
+            title = "Authentication failed"
+        }
+
+    /** The provider response was unusable. Reachable only outside the redirect flow. */
+    @ExceptionHandler(InvalidOAuthIdentityException::class)
+    fun handleInvalidOAuthIdentity(ex: InvalidOAuthIdentityException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(
+            HttpStatus.BAD_REQUEST,
+            "The identity provider response was not usable",
+        ).apply { title = "Invalid identity" }
+
+    /** A valid identity we decline to attach - unverified address, or a closed account. */
+    @ExceptionHandler(OAuthLinkingNotAllowedException::class)
+    fun handleOAuthLinkingNotAllowed(ex: OAuthLinkingNotAllowedException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "Cannot link this identity"
         }
 
     /**

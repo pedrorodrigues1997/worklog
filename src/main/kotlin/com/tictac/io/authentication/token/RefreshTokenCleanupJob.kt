@@ -1,13 +1,14 @@
 package com.tictac.io.authentication.token
 
+import com.tictac.io.authentication.oauth.OAuthLoginCodeService
 import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 import java.time.Instant
 
 /**
- * Expired refresh tokens are dead weight - they cannot be presented successfully, they
- * only grow the table. This removes them on a schedule.
+ * Expired refresh tokens and OAuth login codes are dead weight - they cannot be presented
+ * successfully, they only grow their tables. This removes them on a schedule.
  *
  * Safe to run on every instance: the delete is idempotent, so overlapping runs across a
  * scaled-out deployment cost a little duplicated work and nothing else. No distributed
@@ -16,13 +17,21 @@ import java.time.Instant
 @Component
 class RefreshTokenCleanupJob(
     private val refreshTokenService: RefreshTokenService,
+    private val loginCodeService: OAuthLoginCodeService,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
 
     @Scheduled(cron = "\${security.refresh-token-cleanup.cron}")
     fun deleteExpiredTokens() {
-        val deleted = refreshTokenService.deleteExpiredBefore(Instant.now())
-        if (deleted > 0) log.info("Deleted {} expired refresh tokens", deleted)
+        val now = Instant.now()
+
+        val tokens = refreshTokenService.deleteExpiredBefore(now)
+        if (tokens > 0) log.info("Deleted {} expired refresh tokens", tokens)
+
+        // Login codes live for seconds, so this table would otherwise fill with rows that
+        // were dead almost as soon as they were written.
+        val codes = loginCodeService.deleteExpiredBefore(now)
+        if (codes > 0) log.info("Deleted {} expired OAuth login codes", codes)
     }
 }

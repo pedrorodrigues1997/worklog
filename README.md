@@ -98,6 +98,10 @@ Testcontainers rather than substituting an in-memory database.
 | `RATE_LIMIT_CAPACITY`   | `20`                                 | Requests per window per client. |
 | `RATE_LIMIT_WINDOW`     | `1m`                                 | The window. |
 | `RATE_LIMIT_CLIENT_IP_HEADER` | *(empty)*                      | Header carrying the real client IP. Set to `CF-Connecting-IP` behind Cloudflare; leave empty otherwise. |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | *(empty)*        | Enables Google sign-in. Blank = not registered, and the OAuth endpoints do not exist. |
+| `OAUTH2_SUCCESS_REDIRECT_URI` | `http://localhost:3000/auth/callback` | Frontend landing page after sign-in. |
+| `OAUTH2_FAILURE_REDIRECT_URI` | `http://localhost:3000/auth/error`    | Frontend landing page on failure. |
+| `OAUTH2_LOGIN_CODE_TTL` | `60s`                                | Lifetime of the single-use handoff code. |
 
 The database defaults exist so a developer can clone and run. In any deployed environment
 all of them must be set explicitly. Locally they come from `.env` (see above).
@@ -185,6 +189,8 @@ whole session.
 | `POST /api/auth/login` | public | exchange credentials for tokens |
 | `POST /api/auth/refresh` | public | exchange a refresh token for a new pair |
 | `POST /api/auth/logout` | refresh token | revoke a refresh token |
+| `GET /oauth2/authorization/google` | public | start a Google sign-in |
+| `POST /api/auth/oauth/exchange` | one-time code | finish it, and receive the same token pair |
 | everything else | access token | default-deny |
 
 Neither `refresh` nor `logout` requires an access token, for the same reason: both exist to
@@ -284,6 +290,122 @@ throws otherwise. Since access tokens are not revocable within their lifetime, t
 is what stops a token outliving the account behind it — so sensitive operations should go
 through it rather than trusting `sub` alone.
 
+### Sign in with Google
+
+Optional. With no client id configured, Google is not registered, the OAuth filter chain is
+never created, and the endpoints below do not exist — so the application runs locally with
+none of this set.
+
+```
+GET  /oauth2/authorization/google    browser starts here
+GET  /login/oauth2/code/google       Google redirects back here
+POST /api/auth/oauth/exchange        frontend trades the code for tokens
+```
+
+#### How the flow actually works
+
+1. **Start.** The browser goes to `GET /oauth2/authorization/google`. Spring Security builds
+   an authorization request, stores it in a short-lived HTTP session, and redirects to
+   Google with our `client_id`, the scopes (`openid profile email`), a callback URL and a
+   random `state`. Nothing of ours is sent — no secret, no user data.
+
+2. **Google authenticates the person.** They sign in and consent, on Google's domain. We
+   never see their Google password.
+
+3. **Callback.** Google redirects the browser to `GET /login/oauth2/code/google?code=…&state=…`.
+   `state` is compared against the stored value; a mismatch aborts the flow. That is the CSRF
+   defence for this step, which is why CSRF filtering is disabled on this chain — `state` is
+   the mechanism OAuth defines for it.
+
+4. **Code exchange, server to server.** Spring Security calls Google's token endpoint
+   directly from the backend with the code *and our client secret*. The secret never touches
+   the browser. Google returns an access token and an **ID token** — a JWT signed by Google.
+
+5. **ID token validation.** Spring fetches Google's public keys and checks the signature,
+   that `aud` is our client id (so a token minted for a different application is refused),
+   that `iss` is Google, and that it has not expired. This is the step that makes the claims
+   trustworthy, and it is entirely Spring Security's code — none of it is ours.
+
+6. **Our half begins.** `OAuthLoginSuccessHandler` receives the verified claims.
+   `GoogleIdentityExtractor` maps them to an `OAuthUserIdentity` (subject, email,
+   `email_verified`, names). `OAuthAuthenticationService` turns that into an internal user id
+   by the rules under *Account linking*. Google's own access token is discarded, and the
+   session that carried the flow is destroyed.
+
+7. **Handoff.** The backend mints a single-use code, stores its SHA-256 with a 60-second
+   expiry, and redirects the browser to the frontend with `?code=…`.
+
+8. **Exchange.** The frontend POSTs that code to `/api/auth/oauth/exchange` and receives
+   exactly the token pair a password login returns.
+
+In short:
+
+```
+browser → Google → callback → (backend ⇄ Google: code + secret → ID token)
+        → verify signature/audience/expiry → internal users.id
+        → one-time code → frontend → our access + refresh tokens
+```
+
+`users.id` stays the only identity the application knows. Google's `sub` is never a primary
+key — it is a lookup key in `user_identities`, and every downstream feature sees the same
+UUID whether the person signed in with a password or with Google.
+
+#### Why a one-time code rather than tokens in the URL
+
+Google redirects to the *backend*, but the tokens have to reach a separate SPA. Putting them
+in the redirect URL would write a 30-day refresh token into browser history and into any log
+that records the landing URL. The code is single-use and expires in 60 seconds — the same
+shape as the authorization code we just consumed from Google, and for the same reason.
+
+```bash
+# Browser: GET http://localhost:8080/oauth2/authorization/google
+# ...consent...
+# Browser lands on: http://localhost:3000/auth/callback?code=Yl3n...
+
+curl -s -X POST http://localhost:8080/api/auth/oauth/exchange \
+  -H 'Content-Type: application/json' \
+  -d '{"code":"Yl3n..."}'
+# → exactly the same body a password login returns
+```
+
+Everything after that point is identical for both sign-in methods: one token model, one
+refresh mechanism, one logout. Google's access token is never sent to the frontend.
+
+On failure the browser goes to `OAUTH2_FAILURE_REDIRECT_URI` with `?error=oauth_failed`,
+`oauth_invalid_identity` or `oauth_linking_not_allowed`. Google's error detail is logged,
+never reflected into the URL.
+
+### Account linking
+
+One account can carry a password and Google at once. `user_identities` holds
+`(user_id, provider, provider_user_id)`, unique on `(provider, provider_user_id)` — which is
+what stops two of our users claiming the same Google account — and unique on
+`(user_id, provider)`, so an account cannot accumulate several logins from one provider that
+nobody can tell apart. A separate table rather than columns on `users` because the
+relationship is one-to-many; provider columns would mean a schema change per provider added.
+
+Sign-in resolves in this order:
+
+1. **Known identity** → that user. Matching is on Google's `sub`, never the email, so
+   changing your Google address keeps your account, and the address we hold is not silently
+   rewritten by signing in.
+2. **New identity, verified email, address already registered** → link to that account. The
+   password still works; the account gains a second way in rather than a replaced one.
+3. **New identity, verified email, address unknown** → create a user with no password hash.
+   Password login already refuses a null hash, so the account cannot be entered that way
+   until its owner sets one.
+4. **New identity, unverified email** → refused.
+
+Step 4 is the load-bearing one. Attaching an unverified address to an existing account would
+let anyone who can type a victim's address into a signup form inherit their account; creating
+a *new* account on one lets them squat an address they do not own. Note the gate applies only
+to establishing the link — once it exists, sign-in goes through step 1 and never consults the
+email again.
+
+Google always returns `email_verified`, so the rule is simply to believe it; a missing claim
+counts as unverified. A second provider would need its own extractor, because that signal is
+not the same everywhere — Microsoft, for instance, does not issue the claim at all.
+
 ### Rate limiting
 
 `POST /api/auth/**` is throttled per client: 20 requests a minute by default, answered with
@@ -308,7 +430,8 @@ com.tictac.io
 │   └── ratelimit/   throttling for the auth endpoints
 ├── user/            the user entity, ActiveUser, GET /api/users/me
 └── authentication/  registration, login, refresh, logout, HTTP security
-    └── token/       JWT issuing/decoding, refresh-token state and cleanup
+    ├── token/       JWT issuing/decoding, refresh-token state and cleanup
+    └── oauth/       Google registration, identity linking, sign-in handoff
 ```
 
 Database migrations live in `src/main/resources/db/migration` and are the single source of

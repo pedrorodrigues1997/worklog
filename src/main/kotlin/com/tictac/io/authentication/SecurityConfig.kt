@@ -80,11 +80,14 @@ class SecurityConfig {
         const val LOGIN_PATH = "/api/auth/login"
         const val REFRESH_PATH = "/api/auth/refresh"
         const val LOGOUT_PATH = "/api/auth/logout"
+        const val OAUTH_EXCHANGE_PATH = "/api/auth/oauth/exchange"
 
         /**
-         * All four are authenticated by something other than an access token: credentials
-         * for login, a refresh token for refresh and logout, nothing at all for register.
+         * All of these are authenticated by something other than an access token:
+         * credentials for login, a refresh token for refresh and logout, a single-use code
+         * for the OAuth exchange, nothing at all for register.
          */
-        val PUBLIC_POST_PATHS = listOf(REGISTER_PATH, LOGIN_PATH, REFRESH_PATH, LOGOUT_PATH)
+        val PUBLIC_POST_PATHS =
+            listOf(REGISTER_PATH, LOGIN_PATH, REFRESH_PATH, LOGOUT_PATH, OAUTH_EXCHANGE_PATH)
     }
 }

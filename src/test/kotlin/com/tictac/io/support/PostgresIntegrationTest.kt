@@ -1,5 +1,7 @@
 package com.tictac.io.support
 
+import com.tictac.io.authentication.oauth.OAuthLoginCodeRepository
+import com.tictac.io.authentication.oauth.UserIdentityRepository
 import com.tictac.io.authentication.token.RefreshTokenRepository
 import com.tictac.io.user.UserRepository
 import org.junit.jupiter.api.BeforeEach
@@ -7,6 +9,7 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc
 import org.springframework.context.annotation.Import
+import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.web.servlet.MockMvc
 
 /**
@@ -16,6 +19,7 @@ import org.springframework.test.web.servlet.MockMvc
  */
 @SpringBootTest
 @AutoConfigureMockMvc
+@ActiveProfiles("test")
 @Import(PostgresTestContainerConfig::class)
 abstract class PostgresIntegrationTest {
 
@@ -28,9 +32,17 @@ abstract class PostgresIntegrationTest {
     @Autowired
     protected lateinit var refreshTokenRepository: RefreshTokenRepository
 
-    /** Tests commit, so state has to be cleared explicitly between them. */
+    @Autowired
+    protected lateinit var userIdentityRepository: UserIdentityRepository
+
+    @Autowired
+    protected lateinit var oAuthLoginCodeRepository: OAuthLoginCodeRepository
+
+    /** Tests commit, so state has to be cleared explicitly between them. Children first. */
     @BeforeEach
     fun clearDatabase() {
+        oAuthLoginCodeRepository.deleteAll()
+        userIdentityRepository.deleteAll()
         refreshTokenRepository.deleteAll()
         userRepository.deleteAll()
     }

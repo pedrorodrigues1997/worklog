@@ -73,7 +73,12 @@ class AuthenticationService(
         refreshTokenService.revoke(request.refreshToken!!)
     }
 
-    private fun issueTokensFor(userId: UUID): TokenResponse {
+    /**
+     * The single place tokens are minted, used by password login and by OAuth alike, so
+     * the two can never drift into different session models.
+     */
+    @Transactional
+    fun issueTokensFor(userId: UUID): TokenResponse {
         val accessToken = accessTokenIssuer.issue(userId)
         val refreshToken = refreshTokenService.issueFor(userId)
 
