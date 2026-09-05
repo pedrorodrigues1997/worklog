@@ -1,6 +1,8 @@
 package com.tictac.io.common
 
 import com.tictac.io.authentication.EmailAlreadyRegisteredException
+import com.tictac.io.authentication.InvalidCredentialsException
+import com.tictac.io.authentication.token.InvalidRefreshTokenException
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
@@ -48,6 +50,23 @@ class ApiExceptionHandler : ResponseEntityExceptionHandler() {
     fun handleEmailAlreadyRegistered(ex: EmailAlreadyRegisteredException): ProblemDetail =
         ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
             title = "Email already registered"
+        }
+
+    /**
+     * Login failure. Deliberately identical whether the address is unknown, the password
+     * is wrong, or the account is deleted - the response must not help enumerate accounts.
+     */
+    @ExceptionHandler(InvalidCredentialsException::class)
+    fun handleInvalidCredentials(ex: InvalidCredentialsException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.UNAUTHORIZED, "Invalid email or password").apply {
+            title = "Authentication failed"
+        }
+
+    /** Unknown, expired, already-rotated or revoked refresh token - all indistinguishable. */
+    @ExceptionHandler(InvalidRefreshTokenException::class)
+    fun handleInvalidRefreshToken(ex: InvalidRefreshTokenException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.UNAUTHORIZED, "Refresh token is invalid or has expired").apply {
+            title = "Authentication failed"
         }
 
     /**

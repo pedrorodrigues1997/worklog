@@ -2,11 +2,11 @@ package com.tictac.io.authentication
 
 import com.tictac.io.user.User
 import com.tictac.io.user.UserRepository
+import com.tictac.io.user.normalizeEmail
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
-import java.util.Locale
 
 @Service
 class RegistrationService(
@@ -52,11 +52,4 @@ class RegistrationService(
             createdAt = saved.createdAt,
         )
     }
-
-    /**
-     * Local parts are case-sensitive per RFC 5321, but no mail provider in practice
-     * treats them that way, and users expect Foo@example.com and foo@example.com to be
-     * the same account. Normalising on write keeps the unique index sufficient.
-     */
-    private fun normalizeEmail(email: String): String = email.trim().lowercase(Locale.ROOT)
 }
