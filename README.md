@@ -775,6 +775,192 @@ cascade; closure does not — the person is still an organization member, their 
 simply closed — so their assignment rows stay, inert, and are filtered out of every listing
 along with the closed accounts themselves.
 
+## Time tracking
+
+The product. A user picks an organization, picks a project they may record against, and
+starts a timer — or records the work by hand afterwards.
+
+```
+select organization → select project → start timer → … → stop → time entry
+```
+
+All endpoints are nested under the organization, require a valid access token, and are
+checked against organization membership, organization role and project access before
+anything is written.
+
+| Method   | Path | Purpose |
+| -------- | ---- | ------- |
+| `POST`   | `/api/organizations/{orgId}/time-entries/timer` | start a timer |
+| `GET`    | `/api/organizations/{orgId}/time-entries/timer` | the caller's running timer, or `204` |
+| `POST`   | `/api/organizations/{orgId}/time-entries/{id}/stop` | stop it |
+| `POST`   | `/api/organizations/{orgId}/time-entries` | a manual entry |
+| `GET`    | `/api/organizations/{orgId}/time-entries` | a filtered, paginated list |
+| `GET`    | `/api/organizations/{orgId}/time-entries/{id}` | one entry |
+| `PATCH`  | `/api/organizations/{orgId}/time-entries/{id}` | correct one |
+| `DELETE` | `/api/organizations/{orgId}/time-entries/{id}` | soft delete |
+
+### The timer
+
+```bash
+# Start. The endpoint accepts no timestamp - started_at is server time, always.
+curl -X POST http://localhost:8080/api/organizations/$ORG_ID/time-entries/timer \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"projectId":"...","description":"Implement authentication","billable":true}'
+
+# Stop. Also takes no timestamp.
+curl -X POST http://localhost:8080/api/organizations/$ORG_ID/time-entries/$ENTRY_ID/stop \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "id": "...", "projectId": "...", "projectName": "Website Redesign", "userId": "...",
+  "description": "Implement authentication",
+  "startedAt": "2026-09-06T09:00:48Z", "endedAt": null,
+  "durationSeconds": 3821, "running": true, "billable": true
+}
+```
+
+**The database is the source of truth, not the browser.** A running timer is a row whose
+`ended_at` is null. Close the tab, switch device, sign in again — `GET .../timer` finds it,
+and the elapsed time is computed from the stored `started_at`. Nothing ticks server-side and
+no row is rewritten while a timer runs; `durationSeconds` on a running entry is arithmetic
+performed for that response. `GET .../timer` returns `204 No Content` when nothing is
+running: that is an ordinary state of the world, not a missing resource.
+
+**One running timer per user per organization.** Starting a second is a `409`, not an
+instruction to stop the first — a client that silently closed half an hour of someone's work
+because a button was double-clicked would be worse than a rejected request. The limit is per
+*organization*, so someone consulting for two companies can be on the clock at both.
+
+**Only the owner may stop their own timer**, administrator or not. Stopping asserts what
+someone is doing at this second, and nobody else is in a position to say. An administrator
+who needs to close an abandoned timer edits the entry and sets its end explicitly, which
+records a considered timestamp rather than "whenever they noticed". Stopping twice is a `409`
+and leaves the first stop's timestamp and duration intact.
+
+### Manual entries and editing
+
+```bash
+curl -X POST http://localhost:8080/api/organizations/$ORG_ID/time-entries \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"projectId":"...","description":"Client meeting",
+       "startedAt":"2026-09-01T13:00:00+04:00","endedAt":"2026-09-01T15:00:00+04:00",
+       "billable":true}'
+```
+
+Both ends are required and `endedAt` must be after `startedAt`. **The duration is always
+derived by the server** — there is no duration field on any request DTO, so a client-supplied
+value has nowhere to land rather than being accepted and ignored. Any edit that moves either
+timestamp recalculates it.
+
+`PATCH` accepts `projectId`, `description`, `startedAt`, `endedAt` and `billable`; absent
+fields are left alone. Neither the organization nor the user is editable, and neither appears
+in the request, so no shape of PATCH moves billable history between tenants or reattributes
+someone else's work. `endedAt` cannot be cleared either — "un-stopping" an entry would
+resurrect a second running timer.
+
+Overlapping entries are accepted. Someone may legitimately record a client call that ran
+through a stretch of development work, and deciding which of two overlapping intervals is
+wrong is a reporting question, not something to guess at write time. The one thing that
+cannot overlap is two *running* timers.
+
+### Timestamps
+
+Every timestamp on the wire is **ISO-8601 with an offset** and is stored as `timestamptz` —
+an absolute point on the timeline. `2026-09-01T13:00:00+04:00` and `2026-09-01T09:00:00Z` are
+the same instant and are accepted interchangeably; both come back as the latter. A local time
+with no offset (`2026-09-01T09:00:00`) is rejected: "09:00" is not a moment until someone says
+where, and guessing on the client's behalf is how a timesheet ends up four hours out.
+
+### Who may track time, and against what
+
+| | Track time | See others' entries | Edit/delete others' entries |
+| --- | --- | --- | --- |
+| `OWNER` / `ADMIN` | any **active** project in the organization | yes | yes |
+| `MEMBER` | active projects they are **assigned** to | no | no |
+
+**Administering a project and tracking time against it are separate questions**, and
+administrators pass the second without passing project membership. Requiring an OWNER to
+assign themselves to every project just to log their own hours would make project membership
+mean two things at once — who is on the work, and who may record against it — and
+administrators would pollute the first to get the second.
+
+**Administrators may correct their organization's timesheets.** A member logs eight hours to
+the wrong project and leaves for the day; the alternative is that nobody can fix it or
+everybody can. Scoped strictly to their own organization.
+
+**A MEMBER's listing is scoped to their own entries.** The scope is applied as a predicate
+ANDed with whatever filter was requested, so a member asking for a colleague's entries gets an
+empty page — no leak, and no special-cased error to get wrong.
+
+Active projects gate *new* time only:
+
+```
+starting a timer or recording a manual entry  →  project must be active
+moving an existing entry to another project   →  archived is fine
+```
+
+Correcting which project last quarter's work belongs to is exactly the case where the right
+answer is a project nobody is on any more. And a timer already running when its project is
+archived **keeps running** and can be stopped normally — archiving stops new time being
+tracked, it does not reach in and end work in progress.
+
+### Listing
+
+```
+GET .../time-entries?page=0&size=50&projectId=…&userId=…&from=…&to=…&billable=true
+```
+
+Ordering is fixed server-side: `startedAt DESC, id DESC`. The tiebreaker is not decoration —
+without it, entries sharing a timestamp could shuffle between pages and a client would see one
+twice and another never. `from` is inclusive and `to` exclusive, both matched against
+`startedAt`, so consecutive periods tile without double-counting a boundary entry.
+
+Pagination is `page`/`size`, capped at 200 and defaulting to 50; out-of-range values are
+clamped rather than rejected. The response is a plain envelope rather than Spring Data's
+`Page`, whose JSON is an implementation detail:
+
+```json
+{ "content": [ … ], "page": 0, "size": 50, "totalElements": 128, "totalPages": 3 }
+```
+
+### Historical data
+
+Time entries are what a customer eventually invoices from, and they outlive everything
+around them. Removing someone from a project, removing them from the organization, closing
+their account, archiving the project — **none of these touch a time entry**.
+
+That holds for two structural reasons, not by convention. `time_entries` has no foreign key
+to `project_members` or `organization_members`, so the cascades on those link tables cannot
+reach it. And its own three foreign keys — to organizations, projects and users — all
+*restrict* rather than cascade, so a hard delete of any parent fails loudly instead of
+silently taking billable history with it. Nothing in the application hard-deletes those
+parents, which is exactly why the constraint is worth having: it guards the path nobody
+intends to take.
+
+`DELETE` on an entry is a **soft delete**. Hard deletion was the alternative and was
+rejected: a mis-clicked delete that irreversibly removes a month of billable work is a
+support incident with no recovery path, whereas a tombstone is one `UPDATE` away from being
+undone. That is deliberately not an audit system — there is no record of who deleted an entry
+or why, and no restore endpoint. Deleting a *running* timer frees the one-timer slot
+immediately, so a mistaken start does not lock someone out of the right one.
+
+### Concurrency
+
+Two simultaneous `POST .../timer` requests can both pass a "is a timer running?" check before
+either commits. The application performs that check anyway — it produces a clean `409` in the
+ordinary case — but the guarantee is a partial unique index:
+
+```sql
+CREATE UNIQUE INDEX ux_time_entries_running_per_user_organization
+    ON time_entries (organization_id, user_id)
+    WHERE ended_at IS NULL AND deleted_at IS NULL;
+```
+
+The losing insert violates it, and the violation is translated back into the same `409` the
+pre-check would have produced. The pre-check is the manners; the index is the guarantee.
+
 ## Layout
 
 Code is organised by business domain, not by technical layer:
@@ -787,6 +973,7 @@ com.tictac.io
 ├── user/            the user entity, ActiveUser, GET/DELETE /api/users/me
 ├── organization/    organizations, memberships, roles, tenant-scoped authorization
 ├── project/         projects, assignments, project-scoped authorization
+├── timetracking/    time entries, the timer, entry-scoped authorization
 └── authentication/  registration, login, refresh, logout, HTTP security
     ├── token/       JWT issuing/decoding, refresh-token state and cleanup
     └── oauth/       Google registration, identity linking, sign-in handoff

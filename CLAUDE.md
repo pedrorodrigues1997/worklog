@@ -61,6 +61,11 @@ com.tictac.io
 │   ├── Project*.kt                 entity, repository, DTOs, controllers
 │   ├── ProjectAccess.kt            project-scoped gate, layered on OrganizationAccess
 │   └── Project*Service.kt          creation, settings, assignment
+├── timetracking/
+│   ├── TimeEntry.kt                one row, running or stopped, ended_at decides
+│   ├── TimeEntryAccess.kt          entry-scoped gate, on top of Project/OrganizationAccess
+│   ├── TimerService.kt             start / stop / current
+│   └── TimeEntryService.kt         manual entries, editing, listing, soft delete
 └── authentication/
     ├── SecurityConfig.kt           two filter chains (public POSTs, default-deny)
     ├── PasswordEncoderConfig.kt
@@ -88,6 +93,7 @@ anything, and startup fails if a mapping and a migration have drifted apart.
 | `organization_members` | `(organization_id, user_id)` unique, `role`; one OWNER per org via a partial unique index |
 | `projects` | `project_id`, `organization_id`, `project_name`, `description`, `is_active` (archive flag, not a soft delete), `created_at`, `updated_at` |
 | `project_members` | `(project_id, user_id)` unique - assignment of an organisation member to a project. No role, no organisation id |
+| `time_entries` | `time_entry_id`, `organization_id`, `project_id`, `user_id`, `started_at`, nullable `ended_at`/`duration_seconds`, `billable`, `deleted_at`. One running timer per user per org via a partial unique index; all three FKs RESTRICT |
 
 Designed but **not yet implemented**: `subscriptions`. The agreed DBML for it lives in the
 product brief; treat it as the source of truth and do not redesign it. The organization
@@ -219,8 +225,29 @@ them fail, the change is wrong, not the test.
     foreign key - `project_members` reaches the organisation only through
     `projects.organization_id` - so it is enforced in `OrganizationMembershipService`.
     Account *closure* deliberately does not cascade: it does not break the invariant.
-22. **Projects are archived, never deleted** (`is_active`). Time entries will point at them,
-    and an archived project still has to render every historical entry that references it.
+22. **Projects are archived, never deleted** (`is_active`). Time entries point at them, and an
+    archived project still has to render every historical entry that references it.
+23. **Time entries survive every membership change around them.** No foreign key runs from
+    `time_entries` to a link table, so no cascade can reach one; and its own three FKs
+    RESTRICT rather than cascade, so a hard delete of an organisation, project or user fails
+    loudly instead of taking billable history with it. Removing someone from a project or an
+    organisation, closing their account, and archiving a project all leave entries untouched.
+24. **A running timer is a row with `ended_at IS NULL`.** No status column, no server-side
+    ticking, no periodic write. Elapsed time is computed from `started_at` on read. The
+    browser is never the source of truth - `GET /timer` is how a client rediscovers state.
+25. **One running timer per user per organisation**, enforced by a partial unique index
+    (`WHERE ended_at IS NULL AND deleted_at IS NULL`). The service pre-check exists only for
+    a clean 409; two concurrent starts both pass it and the index is what decides.
+26. **`started_at` and `ended_at` are server time on the timer endpoints, and duration is
+    always derived.** Neither endpoint accepts a timestamp, and no request DTO anywhere has a
+    duration field, so a client-supplied value has nowhere to land rather than being ignored.
+27. **New time needs an active project; corrections do not.** Starting a timer or recording a
+    manual entry requires `is_active`; moving an existing entry to another project does not.
+    A timer already running when its project is archived keeps running.
+28. **Administering a project and tracking time against it are separate questions.** OWNER and
+    ADMIN may track against any active project in their organisation without being assigned
+    to it; a MEMBER only against projects they are assigned to. Do not make administrator
+    behaviour depend on `project_members`.
 
 ### OAuth flow, in one picture
 
@@ -262,13 +289,13 @@ must be the `jdbc:postgresql://…` form.
 docker compose up -d                 # PostgreSQL 17 on :5432
 set -a; source .env; set +a
 ./mvnw spring-boot:run
-./mvnw clean verify                  # 340 tests; Docker must be running
+./mvnw clean verify                  # 433 tests; Docker must be running
 ```
 
 - **Real PostgreSQL via Testcontainers.** No in-memory substitute — it would not catch a
   mismatch between a migration and a mapping.
 - `PostgresIntegrationTest` is the base: `@SpringBootTest` + MockMvc + container, and a
-  `@BeforeEach` that clears all eight tables children-first. `AuthenticatedApiTest` extends it
+  `@BeforeEach` that clears all nine tables children-first. `AuthenticatedApiTest` extends it
   with register/login helpers that go through the **real** endpoints and filter chain.
 - All base-derived tests share one Spring context (and one container). A test that overrides
   properties gets its own context and its own container — currently
@@ -331,14 +358,15 @@ Spring Boot 4 / Kotlin specifics, all discovered the hard way:
 
 Do not add these speculatively; each is its own task.
 
-Subscriptions · Stripe · seats and licensing · clients · tasks · time entries · reports ·
-CSV export · email sending (Resend) · **CORS** · frontend code of any kind.
+Subscriptions · Stripe · seats and licensing · clients · tasks · reports · CSV export ·
+email sending (Resend) · **CORS** · frontend code of any kind.
 
 Organisations, memberships and organisation roles now exist (see the invariants in §5).
-Ownership transfer and account closure exist too (invariants 15-17), and so do projects and
-project assignment (invariants 18-22). What is *not* built on top of them: invitations,
-leaving an organisation or a project voluntarily, per-project roles, and any permission model
-finer than the three organisation roles.
+Ownership transfer and account closure exist too (invariants 15-17), projects and project
+assignment (18-22), and time tracking (23-28). What is *not* built on top of them:
+invitations, leaving an organisation or a project voluntarily, per-project roles, any
+permission model finer than the three organisation roles, and anything that aggregates time
+entries - reporting, timesheets, approvals, invoicing.
 
 Known open items in what *is* built:
 
@@ -379,6 +407,15 @@ Known open items in what *is* built:
   work recorded against it. Worth revisiting once time entries exist.
 - `project_members` has no `deleted_at`, matching `organization_members`. A closed account
   keeps its assignments; they are inert and filtered out of every listing.
+- A soft-deleted time entry has no restore endpoint - recovery is a manual UPDATE - and no
+  record of who deleted it or why. That is the deliberate boundary with an audit system.
+- Nothing caps how long a timer may run. A forgotten one accrues elapsed time indefinitely,
+  and only its owner can stop it. Decide the product answer (auto-stop? flag it? let an admin
+  end it?) before the frontend makes it visible.
+- Time entries have no upper bound on `started_at`, so an entry can be dated in the future.
+- The project *name* in a time-entry response is read live, so a renamed project renames
+  itself across all history. Correct for a UI, and a decision to revisit if invoices ever
+  need the name as it was at the time.
 - `logging` never contains passwords, hashes or tokens. Keep it that way.
 
 ---

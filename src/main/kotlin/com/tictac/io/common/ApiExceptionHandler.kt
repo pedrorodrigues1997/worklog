@@ -13,6 +13,11 @@ import com.tictac.io.organization.OwnershipTransferConflictException
 import com.tictac.io.project.ProjectAssignmentConflictException
 import com.tictac.io.project.ProjectMemberNotFoundException
 import com.tictac.io.project.ProjectNotFoundException
+import com.tictac.io.timetracking.InvalidTimeRangeException
+import com.tictac.io.timetracking.ProjectNotActiveException
+import com.tictac.io.timetracking.TimeEntryNotFoundException
+import com.tictac.io.timetracking.TimeEntryNotRunningException
+import com.tictac.io.timetracking.TimerAlreadyRunningException
 import com.tictac.io.user.AccountClosureBlockedException
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpHeaders
@@ -146,6 +151,53 @@ class ApiExceptionHandler : ResponseEntityExceptionHandler() {
     fun handleProjectAssignmentConflict(ex: ProjectAssignmentConflictException): ProblemDetail =
         ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
             title = "Cannot assign this user"
+        }
+
+    /**
+     * The entry does not exist, belongs to another organization, is deleted, or belongs to
+     * another user and the caller is not an administrator. One answer for all four: a member
+     * has no legitimate way to learn that a colleague's entry exists.
+     */
+    @ExceptionHandler(TimeEntryNotFoundException::class)
+    fun handleTimeEntryNotFound(ex: TimeEntryNotFoundException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.message).apply {
+            title = "Time entry not found"
+        }
+
+    /**
+     * A timer is already running in this organization. A conflict rather than a validation
+     * failure: the request is well-formed, and it is the state of the world that refuses it.
+     * Nothing is stopped implicitly - the caller decides which timer should be running.
+     */
+    @ExceptionHandler(TimerAlreadyRunningException::class)
+    fun handleTimerAlreadyRunning(ex: TimerAlreadyRunningException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "Timer already running"
+        }
+
+    /** Stop called on an entry that is not running - including a second stop. */
+    @ExceptionHandler(TimeEntryNotRunningException::class)
+    fun handleTimeEntryNotRunning(ex: TimeEntryNotRunningException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "Time entry is not running"
+        }
+
+    /**
+     * New time cannot be recorded against an archived project. Distinguishable from "not
+     * found" deliberately: the caller can see the project, so its state is not a secret, and
+     * this is the one message that says what to do about it.
+     */
+    @ExceptionHandler(ProjectNotActiveException::class)
+    fun handleProjectNotActive(ex: ProjectNotActiveException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "Project is archived"
+        }
+
+    /** The two ends of a time entry do not make an interval. */
+    @ExceptionHandler(InvalidTimeRangeException::class)
+    fun handleInvalidTimeRange(ex: InvalidTimeRangeException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.message).apply {
+            title = "Invalid time range"
         }
 
     /**

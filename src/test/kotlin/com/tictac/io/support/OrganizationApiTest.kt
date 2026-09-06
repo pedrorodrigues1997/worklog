@@ -4,6 +4,7 @@ import com.jayway.jsonpath.JsonPath
 import com.tictac.io.organization.OrganizationMember
 import com.tictac.io.organization.OrganizationRole
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
+import java.time.Instant
 import java.util.UUID
 
 /** An account plus the tokens it signed in with, so a test can act as that person. */
@@ -87,4 +88,61 @@ abstract class OrganizationApiTest : AuthenticatedApiTest() {
 
     protected fun isAssigned(projectId: UUID, user: TestUser): Boolean =
         projectMemberRepository.findByProjectIdAndUserId(projectId, user.id) != null
+
+    /** Archives a project through the real endpoint. [caller] must be OWNER or ADMIN. */
+    protected fun archiveProject(organizationId: UUID, projectId: UUID, caller: TestUser) {
+        patchJson(
+            "/api/organizations/$organizationId/projects/$projectId",
+            """{"isActive":false}""",
+            caller.accessToken,
+        ).andExpect(status().isOk)
+    }
+
+    /** Starts a timer through the real endpoint and returns the new entry's id. */
+    protected fun startTimer(
+        organizationId: UUID,
+        projectId: UUID,
+        user: TestUser,
+        description: String? = null,
+        billable: Boolean = false,
+    ): UUID {
+        val body = if (description == null) {
+            """{"projectId":"$projectId","billable":$billable}"""
+        } else {
+            """{"projectId":"$projectId","description":"$description","billable":$billable}"""
+        }
+
+        val response = postJson(
+            "/api/organizations/$organizationId/time-entries/timer",
+            body,
+            user.accessToken,
+        )
+            .andExpect(status().isCreated)
+            .andReturn().response.contentAsString
+
+        return UUID.fromString(JsonPath.read(response, "$.id"))
+    }
+
+    /** Creates a manual entry through the real endpoint and returns its id. */
+    protected fun createTimeEntry(
+        organizationId: UUID,
+        projectId: UUID,
+        user: TestUser,
+        startedAt: Instant,
+        endedAt: Instant,
+        description: String? = null,
+        billable: Boolean = false,
+    ): UUID {
+        val descriptionField = if (description == null) "" else ""","description":"$description""""
+        val response = postJson(
+            "/api/organizations/$organizationId/time-entries",
+            """{"projectId":"$projectId","startedAt":"$startedAt","endedAt":"$endedAt","billable":$billable""" +
+                descriptionField + "}",
+            user.accessToken,
+        )
+            .andExpect(status().isCreated)
+            .andReturn().response.contentAsString
+
+        return UUID.fromString(JsonPath.read(response, "$.id"))
+    }
 }
