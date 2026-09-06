@@ -1,6 +1,12 @@
 package com.tictac.io.support
 
 import com.jayway.jsonpath.JsonPath
+import com.tictac.io.billing.BillingCustomer
+import com.tictac.io.billing.BillingInterval
+import com.tictac.io.billing.BillingProvider
+import com.tictac.io.billing.OrganizationLicenses
+import com.tictac.io.billing.Subscription
+import com.tictac.io.billing.SubscriptionStatus
 import com.tictac.io.organization.OrganizationMember
 import com.tictac.io.organization.OrganizationRole
 import jakarta.persistence.EntityManager
@@ -237,6 +243,86 @@ abstract class OrganizationApiTest : AuthenticatedApiTest() {
                 .executeUpdate()
         }
     }
+
+    /**
+     * Gives an organization an active subscription with [seats] paid seats.
+     *
+     * Stands in for a completed checkout plus the webhook that confirms it - there is no API
+     * that creates a subscription locally, and there should not be. Seeding the row is the
+     * only way to put a test organization into the paid state without a Stripe account.
+     *
+     * [licenses] is the total the organization ends up holding, free included one and all -
+     * so the Stripe quantity seeded is one fewer. The organization's own `license_count` is
+     * written too, because that is the number every allocation decision reads; seeding only
+     * the subscription would leave a test paying for licences the organization does not hold.
+     *
+     * Inviting somebody acquires a licence when none is vacant, and that calls Stripe - so a
+     * test that seeds enough licences up front needs no Stripe stand-in at all.
+     */
+    protected fun subscribeOrganization(
+        organizationId: UUID,
+        licenses: Int,
+        interval: BillingInterval = BillingInterval.MONTHLY,
+        status: SubscriptionStatus = SubscriptionStatus.ACTIVE,
+    ): Subscription {
+        setLicenseCount(organizationId, licenses)
+
+        billingCustomerRepository.findByOrganizationIdAndProvider(organizationId, BillingProvider.STRIPE)
+            ?: billingCustomerRepository.saveAndFlush(
+                BillingCustomer(organizationId, BillingProvider.STRIPE, "cus_test_$organizationId"),
+            )
+
+        return subscriptionRepository.saveAndFlush(
+            Subscription(
+                organizationId = organizationId,
+                billingInterval = interval,
+                status = status,
+                paidLicenses = OrganizationLicenses.paidLicensesFor(licenses.toLong()).toInt(),
+                provider = BillingProvider.STRIPE,
+            ).apply {
+                providerSubscriptionId = "sub_test_$organizationId"
+                providerItemId = "si_test_$organizationId"
+            },
+        )
+    }
+
+    /**
+     * Sets the organization's licence count directly, with no subscription behind it.
+     *
+     * For tests that need room for people without a billing relationship to explain where it
+     * came from - and for the one case that genuinely has no subscription: an organization
+     * whose subscription ended but whose members are still in their licences.
+     */
+    protected fun setLicenseCount(organizationId: UUID, licenses: Int) {
+        val organization = organizationRepository.findById(organizationId).orElseThrow()
+        organization.licenseCount = licenses
+        organizationRepository.saveAndFlush(organization)
+    }
+
+    /**
+     * Marks an organization deleted directly, with no billing side effects.
+     *
+     * `DELETE /api/organizations/{id}` also stops the Stripe subscription renewing, which is
+     * right but pulls a Stripe stand-in into every suite that merely needs a closed tenant to
+     * point at. Tests about the *deletion* itself go through the endpoint - see
+     * OrganizationSoftDeleteIntegrationTest.
+     */
+    protected fun closeOrganization(organizationId: UUID) {
+        val organization = organizationRepository.findById(organizationId).orElseThrow()
+        organization.deletedAt = Instant.now()
+        organizationRepository.saveAndFlush(organization)
+    }
+
+    /** Licences the organization holds. */
+    protected fun licenseCountOf(organizationId: UUID): Int =
+        organizationRepository.findById(organizationId).orElseThrow().licenseCount
+
+    /** Licences Stripe is billed for, or null when there is no subscription at all. */
+    protected fun billedLicensesOf(organizationId: UUID): Int? =
+        subscriptionRepository.findByOrganizationId(organizationId)?.paidLicenses
+
+    protected fun memberCountOf(organizationId: UUID): Long =
+        organizationMemberRepository.countByOrganizationId(organizationId)
 
     protected companion object {
         const val DEFAULT_TIME_ENTRY_TITLE = "Tracked work"

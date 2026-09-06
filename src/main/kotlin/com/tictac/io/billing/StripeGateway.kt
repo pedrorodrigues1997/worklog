@@ -6,6 +6,7 @@ import com.stripe.exception.StripeException
 import com.stripe.model.Event
 import com.stripe.net.Webhook
 import com.stripe.param.CustomerCreateParams
+import com.stripe.param.SubscriptionUpdateParams
 import com.stripe.param.billingportal.SessionCreateParams as PortalSessionCreateParams
 import com.stripe.param.checkout.SessionCreateParams
 import org.slf4j.LoggerFactory
@@ -93,7 +94,7 @@ class StripeGateway(
         customerId: String,
         priceId: String,
         organizationId: UUID,
-        seatQuantity: Long,
+        quantity: Long,
     ): StripeSessionHandle {
         requireConfigured()
 
@@ -107,7 +108,7 @@ class StripeGateway(
                     .addLineItem(
                         SessionCreateParams.LineItem.builder()
                             .setPrice(priceId)
-                            .setQuantity(seatQuantity)
+                            .setQuantity(quantity)
                             .build(),
                     )
                     .putMetadata(ORGANIZATION_METADATA_KEY, organizationId.toString())
@@ -131,6 +132,89 @@ class StripeGateway(
             )
 
             StripeSessionHandle(session.id, session.url)
+        }
+    }
+
+    /**
+     * Sets the subscription's **paid licence** count - the licences the organization holds,
+     * less the one included free.
+     *
+     * The quantity is **set, never incremented** - the caller sends the whole number, so a
+     * Stripe quantity that has drifted (a failed call, a change made in the dashboard) is
+     * corrected by the next licence change rather than compounded.
+     *
+     * The quantity lives on the subscription *item*, not the subscription: Stripe's update
+     * params have no top-level quantity. That is why [Subscription.providerItemId] is stored -
+     * otherwise every change would need a round trip just to learn the item id.
+     *
+     * **The price is not touched, so the billing interval survives every change.** A monthly
+     * subscription stays monthly and an annual one stays annual; only the quantity moves.
+     *
+     * Proration is Stripe's, at its default (`create_prorations`), and deliberately not ours:
+     * acquiring a licence part-way through a period bills the difference for the remainder,
+     * and giving one up credits it. That is as true of an annual subscription as a monthly
+     * one - a licence added in month nine of twelve is charged for the remaining three - and
+     * there is no arithmetic in this codebase that could get it wrong. It is also what lets an
+     * administrator add a licence without going near checkout: there is already a card on
+     * file, and Stripe charges it for the difference.
+     */
+    fun updateSubscriptionQuantity(subscriptionId: String, itemId: String, quantity: Long) {
+        requireConfigured()
+
+        stripeCall("update subscription quantity") {
+            client.subscriptions().update(
+                subscriptionId,
+                SubscriptionUpdateParams.builder()
+                    .addItem(
+                        SubscriptionUpdateParams.Item.builder()
+                            .setId(itemId)
+                            .setQuantity(quantity)
+                            .build(),
+                    )
+                    .setProrationBehavior(SubscriptionUpdateParams.ProrationBehavior.CREATE_PRORATIONS)
+                    .build(),
+            )
+        }
+    }
+
+    /**
+     * Ends the subscription immediately.
+     *
+     * Used when an organization gives up its last paid licence and owes nothing. Immediate
+     * rather than at period end, because the alternative is billing somebody for licences that
+     * no longer exist until their renewal date; Stripe credits the unused remainder.
+     *
+     * See [OrganizationLicenseService] for why this is preferred over leaving a subscription
+     * alive at quantity zero.
+     */
+    fun cancelSubscription(subscriptionId: String) {
+        requireConfigured()
+
+        stripeCall("cancel subscription") { client.subscriptions().cancel(subscriptionId) }
+    }
+
+    /**
+     * Stops the subscription renewing, without ending it now.
+     *
+     * Stripe keeps the subscription `active` until the current period runs out and only then
+     * moves it to `canceled`, so this is a flag rather than a deletion - which is exactly why
+     * [Subscription.cancelAtPeriodEnd] is stored separately from [Subscription.cancelledAt].
+     *
+     * The default for deleting an organization. The customer has already paid for the period,
+     * and refusing to let them have it - or refunding it unasked - is a worse answer than
+     * simply not charging them again. Immediate cancellation is [cancelSubscription], and it
+     * has to be asked for.
+     */
+    fun cancelSubscriptionAtPeriodEnd(subscriptionId: String) {
+        requireConfigured()
+
+        stripeCall("schedule subscription cancellation") {
+            client.subscriptions().update(
+                subscriptionId,
+                SubscriptionUpdateParams.builder()
+                    .setCancelAtPeriodEnd(true)
+                    .build(),
+            )
         }
     }
 

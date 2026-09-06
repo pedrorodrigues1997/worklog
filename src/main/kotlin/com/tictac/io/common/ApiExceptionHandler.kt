@@ -7,10 +7,15 @@ import com.tictac.io.authentication.oauth.InvalidOAuthIdentityException
 import com.tictac.io.authentication.oauth.OAuthLinkingNotAllowedException
 import com.tictac.io.authentication.token.InvalidRefreshTokenException
 import com.tictac.io.organization.InvalidOwnershipTransferException
+import com.tictac.io.billing.NoLicenseAvailableException
+import com.tictac.io.billing.NoSubscriptionToResizeException
+import com.tictac.io.billing.LicensesOccupiedException
+import com.tictac.io.billing.NoSubscriptionForLicenseException
+import com.tictac.io.billing.AlreadySubscribedException
 import com.tictac.io.billing.BillingNotConfiguredException
+import com.tictac.io.billing.IntervalNotPurchasableException
 import com.tictac.io.billing.InvalidWebhookPayloadException
 import com.tictac.io.billing.InvalidWebhookSignatureException
-import com.tictac.io.billing.PlanNotPurchasableException
 import com.tictac.io.billing.StripeUnavailableException
 import com.tictac.io.billing.UnmappableStripeStateException
 import com.tictac.io.organization.AlreadyOrganizationMemberException
@@ -312,11 +317,64 @@ class ApiExceptionHandler : ResponseEntityExceptionHandler() {
             title = "Billing provider error"
         }
 
-    /** A plan with no price configured cannot be checked out. */
-    @ExceptionHandler(PlanNotPurchasableException::class)
-    fun handlePlanNotPurchasable(ex: PlanNotPurchasableException): ProblemDetail =
-        ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_ENTITY, ex.message).apply {
-            title = "Plan is not purchasable"
+    /**
+     * Every licence the organization holds is occupied, and it has no subscription to acquire
+     * another on.
+     *
+     * 409, consistent with every other "the state of the world refuses this" answer in this
+     * API. 402 Payment Required reads better in isolation but is reserved by RFC 9110 and
+     * would be the only code of its kind here; the distinct `title` is what a client branches
+     * on, and the count lets it explain the situation without another request.
+     */
+    @ExceptionHandler(NoSubscriptionForLicenseException::class)
+    fun handleNoSubscriptionForLicense(ex: NoSubscriptionForLicenseException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "No subscription to add a licence to"
+            setProperty("licenseCount", ex.licenseCount)
+        }
+
+    /**
+     * A licence was expected to be free for somebody joining and was not.
+     *
+     * Reached at acceptance, after a licence was acquired for the invitee - so it means the
+     * count moved in between, not that the invitation was wrong.
+     */
+    @ExceptionHandler(NoLicenseAvailableException::class)
+    fun handleNoLicenseAvailable(ex: NoLicenseAvailableException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "No licence available"
+            setProperty("licenseCount", ex.licenseCount)
+            setProperty("membersOccupying", ex.membersOccupying)
+        }
+
+    /** Reducing the licence count below the members occupying licences. */
+    @ExceptionHandler(LicensesOccupiedException::class)
+    fun handleLicensesOccupied(ex: LicensesOccupiedException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "Licences are occupied"
+            setProperty("licensesRequested", ex.licensesRequested)
+            setProperty("minimumLicenses", ex.minimumLicenses)
+        }
+
+    /** Changing the licence count before the organization has ever bought a subscription. */
+    @ExceptionHandler(NoSubscriptionToResizeException::class)
+    fun handleNoSubscriptionToResize(ex: NoSubscriptionToResizeException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "No subscription yet"
+        }
+
+    /** No Stripe price is configured for the requested billing interval. */
+    @ExceptionHandler(IntervalNotPurchasableException::class)
+    fun handleIntervalNotPurchasable(ex: IntervalNotPurchasableException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, ex.message).apply {
+            title = "Billing interval not available"
+        }
+
+    /** One subscription per organization; seats grow on the existing one. */
+    @ExceptionHandler(AlreadySubscribedException::class)
+    fun handleAlreadySubscribed(ex: AlreadySubscribedException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "Already subscribed"
         }
 
     /**

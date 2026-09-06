@@ -9,6 +9,7 @@ import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
+import org.springframework.web.bind.annotation.PutMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestHeader
 import org.springframework.web.bind.annotation.RequestMapping
@@ -35,11 +36,20 @@ class BillingController(
     private val billingService: BillingService,
 ) {
 
-    /** OWNER only. Returns where to send the browser; activates nothing. */
+    /**
+     * The organization's **first** licence purchase. OWNER or ADMIN.
+     *
+     * Checkout exists to capture a card, and that happens exactly once in an organization's
+     * life. Every later change - more licences, fewer licences - is
+     * [LicenseController.changeLicenseCount], which charges the saved card with no checkout
+     * and no redirect.
+     *
+     * Returns where to send the browser; activates nothing until Stripe says so.
+     */
     @PostMapping("/checkout")
     fun startCheckout(
         @PathVariable organizationId: UUID,
-        @Valid @RequestBody request: StartCheckoutRequest,
+        @Valid @RequestBody request: CheckoutRequest,
     ): CheckoutSessionResponse = billingService.startCheckout(organizationId, request)
 
     /**
@@ -49,6 +59,40 @@ class BillingController(
     @PostMapping("/portal")
     fun openPortal(@PathVariable organizationId: UUID): BillingPortalSessionResponse =
         billingService.openBillingPortal(organizationId)
+}
+
+/**
+ * The organization's **licences**: how many it holds, who occupies them, how many are vacant.
+ *
+ * Under `/organizations/{id}/licenses` rather than under `/billing`, because a licence is
+ * something the organization holds - the subscription is only how it pays for them. Reading is
+ * open to any member; changing the count is an administrator's operation and the one thing in
+ * this application that moves money without a redirect.
+ */
+@RestController
+@RequestMapping("/api/organizations/{organizationId}/licenses")
+class LicenseController(
+    private val billingService: BillingService,
+) {
+
+    @GetMapping
+    fun get(@PathVariable organizationId: UUID): LicenseResponse =
+        billingService.getLicenses(organizationId)
+
+    /**
+     * Sets how many licences the organization holds. OWNER or ADMIN.
+     *
+     * **No checkout, no redirect, no card re-entry** - Stripe charges the payment method on
+     * file and prorates. `PUT` because the body is the whole licence count, not a delta:
+     * sending the same number twice does nothing the second time.
+     *
+     * Reducing to 1 - the free included licence - cancels the subscription.
+     */
+    @PutMapping
+    fun changeLicenseCount(
+        @PathVariable organizationId: UUID,
+        @Valid @RequestBody request: LicenseCountRequest,
+    ): LicenseResponse = billingService.changeLicenseCount(organizationId, request)
 }
 
 /**

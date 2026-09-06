@@ -37,6 +37,10 @@ class InvitationTenantIsolationIntegrationTest : OrganizationApiTest() {
 
         organizationA = createOrganization(ownerA, "Organization A")
         organizationB = createOrganization(ownerB, "Organization B")
+
+        // Both are one-member organizations, so each needs a seat for the person joining.
+        subscribeOrganization(organizationA, licenses = 2)
+        subscribeOrganization(organizationB, licenses = 2)
     }
 
     @Test

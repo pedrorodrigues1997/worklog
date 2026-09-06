@@ -1,5 +1,6 @@
 package com.tictac.io.organization
 
+import com.tictac.io.billing.OrganizationLicenseService
 import com.tictac.io.user.ActiveUser
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -12,6 +13,7 @@ class OrganizationService(
     private val organizationRepository: OrganizationRepository,
     private val organizationMemberRepository: OrganizationMemberRepository,
     private val organizationAccess: OrganizationAccess,
+    private val organizationLicenseService: OrganizationLicenseService,
 ) {
 
     /**
@@ -79,21 +81,38 @@ class OrganizationService(
     }
 
     /**
-     * Soft delete. OWNER only, and closing the organization is all it does.
+     * Soft delete. OWNER only.
      *
-     * Nothing cascades: memberships stay, and the clients, projects and time entries that
-     * will eventually hang off an organization stay too. Destroying a customer's data on
-     * one API call is not recoverable, and the row-level tombstone is enough to make the
-     * organization unreachable - [OrganizationAccess] refuses it, and it drops out of
-     * every listing. Purging, and restoring, are separate deliberate operations.
+     * Nothing cascades: memberships stay, and the projects, categories and time entries that
+     * hang off an organization stay too. Destroying a customer's data on one API call is not
+     * recoverable, and the row-level tombstone is enough to make the organization unreachable -
+     * [OrganizationAccess] refuses it, and it drops out of every listing. Purging, and
+     * restoring, are separate deliberate operations.
+     *
+     * **Billing does not stay.** A deleted organization that kept renewing would charge
+     * somebody for a tenant they can no longer reach - and could never be fixed through the
+     * API, because every billing endpoint goes through the same gate that now refuses it. So
+     * this is the last chance to stop the money, and it takes it.
+     *
+     * Cancellation is **at period end** unless [cancelImmediately] says otherwise: the current
+     * period is already paid for, and quietly taking it away is worse than simply not renewing.
+     * The organization is unreachable either way, so nobody is getting anything for the
+     * remainder - what differs is only whether they are charged again.
+     *
+     * Stripe is called before this commits. If it refuses, the delete rolls back and the owner
+     * can retry, which is far better than an unreachable organization still being billed.
      */
     @Transactional
-    fun softDelete(organizationId: UUID) {
+    fun softDelete(organizationId: UUID, cancelImmediately: Boolean = false) {
         val context = organizationAccess.require(organizationId, OrganizationRole.OWNER)
 
-        if (context.organization.deletedAt == null) {
-            context.organization.deletedAt = Instant.now()
-        }
+        // OrganizationAccess already refuses a deleted tenant, so this is unreachable rather
+        // than merely unlikely - kept so a second delete could never double-cancel.
+        if (context.organization.deletedAt != null) return
+
+        organizationLicenseService.cancelForOrganizationDeletion(organizationId, cancelImmediately)
+
+        context.organization.deletedAt = Instant.now()
     }
 
     private fun OrganizationContext.toResponse() =

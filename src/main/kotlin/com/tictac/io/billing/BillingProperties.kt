@@ -7,7 +7,11 @@ import org.springframework.boot.context.properties.ConfigurationProperties
  *
  * Price ids in particular: a `price_1234` written into a service would be wrong in every
  * environment but the one it was copied from, and unfindable when it needed changing. Here
- * they are configuration, and the code only ever speaks in [SubscriptionPlan].
+ * they are configuration, and the code only ever speaks in [BillingInterval].
+ *
+ * There is **one price per interval and no tiers** - the same licence at the same per-unit
+ * cost, billed monthly or annually. TicTac sells no feature plans, so a price is not a product
+ * decision, only a billing cadence.
  *
  * Entirely optional. With no secret key the application still boots and every non-billing
  * feature works - a developer must be able to clone and run without a Stripe account, the
@@ -22,8 +26,14 @@ data class BillingProperties(
     /** `whsec_...`. The shared secret every webhook signature is checked against. */
     val webhookSecret: String,
 
-    /** Plan to Stripe price id. A plan with no price cannot be checked out. */
-    val prices: Map<SubscriptionPlan, String>,
+    /**
+     * Billing interval to Stripe price id.
+     *
+     * Each must be an ordinary **per-unit** price: the quantity sent is the organization's
+     * *paid* licences, which already excludes the free included one, so a graduated tier would
+     * discount it twice.
+     */
+    val prices: Map<BillingInterval, String>,
 
     /** Where Stripe sends the browser afterwards. Fixed here, never taken from a request. */
     val successUrl: String,
@@ -33,22 +43,18 @@ data class BillingProperties(
     /** Blank key means "not configured", which is the normal state locally. */
     val configured: Boolean get() = secretKey.isNotBlank()
 
-    /**
-     * The price to charge for [plan], or null if it has none configured.
-     *
-     * [SubscriptionPlan.FREE] deliberately has no price: there is nothing to check out.
-     */
-    fun priceFor(plan: SubscriptionPlan): String? = prices[plan]?.takeIf { it.isNotBlank() }
+    /** The price for [interval], or null if this deployment has none configured for it. */
+    fun priceFor(interval: BillingInterval): String? = prices[interval]?.takeIf { it.isNotBlank() }
 
     /**
-     * The plan a Stripe price id belongs to, for reading webhooks back.
+     * The interval a Stripe price id belongs to, for reading webhooks back.
      *
      * Returns null for a price this deployment does not know - which the webhook handler
-     * treats as a loud failure rather than guessing a plan. A price created in the Stripe
-     * dashboard and never added here is a configuration mistake, and the alternative to
-     * failing is billing somebody for a plan nobody chose.
+     * treats as a loud failure rather than guessing. A price created in the Stripe dashboard
+     * and never added here is a configuration mistake, and the alternative to failing is
+     * recording a billing cadence nobody chose.
      */
-    fun planFor(priceId: String?): SubscriptionPlan? =
+    fun intervalFor(priceId: String?): BillingInterval? =
         priceId?.let { id -> prices.entries.firstOrNull { it.value == id }?.key }
 
     init {

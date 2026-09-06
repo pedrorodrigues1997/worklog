@@ -1,5 +1,6 @@
 package com.tictac.io.organization
 
+import com.tictac.io.billing.OrganizationLicenseService
 import com.tictac.io.common.security.SecureToken
 import com.tictac.io.user.UserRepository
 import com.tictac.io.user.normalizeEmail
@@ -31,6 +32,7 @@ class OrganizationInvitationService(
     private val organizationInvitationRepository: OrganizationInvitationRepository,
     private val organizationMemberRepository: OrganizationMemberRepository,
     private val userRepository: UserRepository,
+    private val organizationLicenseService: OrganizationLicenseService,
     private val properties: InvitationProperties,
 ) {
 
@@ -54,8 +56,27 @@ class OrganizationInvitationService(
         // invitation that no account could ever match.
         val email = normalizeEmail(request.email!!)
 
+        // Serialises this invitation against every other licence allocation in the
+        // organization. Without it two administrators inviting at the same instant would both
+        // see the same single vacant licence and both promise it away.
+        val organization = organizationLicenseService.lockOrganization(context.organizationId)
+            ?: throw IllegalStateException("Organization ${context.organizationId} disappeared while inviting")
+
         requireNotAlreadyAMember(context.organizationId, email)
+
+        // Cleared before the licence is acquired: a lapsed invitation is still holding one,
+        // and deleting it may be all the room this invitation needs.
         clearLapsedInvitation(context.organizationId, email)
+
+        // **This is where money moves.** A vacant licence is reused for free; if there is none,
+        // one is acquired now and Stripe's quantity goes up with it.
+        //
+        // Here rather than at acceptance, deliberately. The person spending is then always the
+        // administrator who chose to bring somebody in - never the invitee, whose click would
+        // otherwise be what charged the company's card. It also means the administrator finds
+        // out immediately if the organization cannot afford another licence, instead of the
+        // invitee discovering it on a link that could never work.
+        organizationLicenseService.acquireLicenseForMember(organization)
 
         val now = Instant.now()
         val rawToken = SecureToken.generate()

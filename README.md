@@ -97,7 +97,8 @@ Testcontainers rather than substituting an in-memory database.
 | `INVITATION_TTL`        | `7d`                                 | How long an organization invitation stays usable. |
 | `STRIPE_SECRET_KEY`     | *(empty)*                            | Enables billing. Blank = billing off, application still runs. |
 | `STRIPE_WEBHOOK_SECRET` | *(empty)*                            | Required once a key is set: every webhook signature is checked against it. |
-| `STRIPE_PRICE_PRO`      | *(empty)*                            | Stripe price id for the PRO plan. |
+| `STRIPE_PRICE_MONTHLY`  | *(empty)*                            | Stripe price id for monthly per-licence billing. |
+| `STRIPE_PRICE_ANNUAL`   | *(empty)*                            | Stripe price id for annual per-licence billing. |
 | `STRIPE_SUCCESS_URL` / `STRIPE_CANCEL_URL` / `STRIPE_PORTAL_RETURN_URL` | `http://localhost:3000/billing…` | Where Stripe returns the browser. Never taken from a request. |
 | `RATE_LIMIT_ENABLED`    | `true`                               | Throttling of `/api/auth`. |
 | `RATE_LIMIT_CAPACITY`   | `20`                                 | Requests per window per client. |
@@ -634,7 +635,7 @@ closed accounts are filtered out of every member listing — so deleting it woul
 record of who was in an organization to no observable benefit, and soft-deleting it would
 mean inventing a whole membership lifecycle for a state nothing can see. The one cost is that
 an organization's member count and its `organization_members` row count can differ; that
-matters when seats are billed, where the fix is to count through `users.deleted_at`.
+matters when licences are billed, where the fix is to count through `users.deleted_at`.
 
 The invariant all of this protects: **an active organization is never owned by a closed
 account.**
@@ -1206,45 +1207,245 @@ pre-check would have produced. The pre-check is the manners; the index is the gu
 The organization is the customer. One organization, one Stripe customer, one subscription.
 Users never own subscriptions.
 
+**TicTac sells no feature tiers.** Every organization has every feature, on every plan, paid or
+not. The only thing money buys is **licences** - room for more people.
+
+### The vocabulary
+
+Four words, used consistently and never interchangeably:
+
+| Term | Meaning |
+| --- | --- |
+| **Subscription** | the organization's Stripe billing agreement. One per organization |
+| **Licence** | a place in the organization it has paid for. Occupied, or vacant |
+| **Member** | a person in the organization, occupying exactly one licence |
+| **Vacant licence** | a licence the organization holds and is paying for, with nobody in it |
+
 ```
-TicTac OWNER ──▶ POST /billing/checkout ──▶ Stripe Checkout ──▶ payment
-                                                                   │
-   subscription state ◀── update ◀── resolve org ◀── idempotency ◀──┤
-            │                                            ▲         │
-            │                                    verify signature ◀┘
-            ▼                                       (webhook)
-   GET /subscription
+Organization
+    ├── license_count = 5          what it holds
+    ├── members       = 4          who is in them  → 1 vacant
+    │
+    ├── Stripe Customer
+    └── Stripe Subscription
+             └── quantity = 4      what it is billed for (5 - 1 free)
 ```
 
-**Stripe is the source of payment truth.** Creating a checkout session activates nothing —
-it means a payment form has been prepared. The subscription becomes real only when Stripe
-says so over a signed webhook, so a user who closes the browser and never returns still ends
-up subscribed, and a user who reaches the success page without paying does not.
+There is never a user-level subscription, and never a second subscription per organization.
+Licence changes move the **quantity on the existing one**.
+
+### Pricing: the first licence is included
+
+```
+first licence in an organization    free
+every additional licence            $X per period
+
+paidLicenses = licenseCount - 1     ← the Stripe subscription quantity
+vacant       = licenseCount - members
+```
+
+| licences | members | vacant | Stripe quantity | per period |
+| -------- | ------- | ------ | --------------- | ---------- |
+| 1        | 1       | 0      | — (no sub)      | free       |
+| 2        | 2       | 0      | 1               | 1 × $X     |
+| 5        | 5       | 0      | 4               | 4 × $X     |
+| 5        | 4       | 1      | 4               | 4 × $X     |
+| 5        | 3       | 2      | 4               | 4 × $X     |
+
+Note the last two rows: **an organization can hold more licences than it has members**, and it
+pays for all of them. That is the whole point.
+
+### The rule that matters most
+
+```
+member removal              ≠  licence removal
+member + vacant licence     =  assign the existing licence, bill nothing
+member + no vacant licence  =  acquire another licence, quantity + 1
+explicit licence removal    =  quantity - 1
+```
+
+Removing somebody **vacates** their licence. The organization keeps it, keeps paying for it,
+and the next person moves straight into it with nothing to buy. Giving a licence up is a
+separate, deliberate act.
+
+### When a licence is acquired
+
+**At invite time, not acceptance time.** An OWNER or ADMIN invites somebody; if no licence is
+vacant, one is acquired right there and the invitation goes out against it. By the time the
+invitee clicks their link, the licence is already paid for.
+
+That ordering is deliberate: the person spending money is always somebody authorised to spend
+it. If licences were acquired on acceptance, an outsider's click would be what charged the
+company's card - and the administrator would only find out afterwards.
+
+An **outstanding invitation holds a licence**. Two invitations issued back to back against one
+vacant licence acquire a second one; they are not both promised the same licence.
+
+### The endpoints
 
 | Method | Path | Who |
 | ------ | ---- | --- |
-| `POST` | `/api/organizations/{orgId}/billing/checkout` | `OWNER` |
+| `GET`  | `/api/organizations/{orgId}/licenses` | any member |
+| `PUT`  | `/api/organizations/{orgId}/licenses` | `OWNER`, `ADMIN` |
+| `POST` | `/api/organizations/{orgId}/billing/checkout` | `OWNER`, `ADMIN` |
 | `POST` | `/api/organizations/{orgId}/billing/portal` | `OWNER` |
 | `GET`  | `/api/organizations/{orgId}/subscription` | any member |
 | `POST` | `/api/webhooks/stripe` | Stripe, by signature |
 
+Licence management is OWNER or ADMIN: an administrator who can invite somebody can already
+cause a licence to be acquired, so denying them the explicit operation would be a distinction
+without a difference. The **billing portal stays OWNER-only** - that is cards, invoices and
+cancellation, which is the payment instrument rather than the headcount.
+
 Billing is **optional**: with no `STRIPE_SECRET_KEY` the application boots normally, every
-other feature works, and billing endpoints answer `503`. Reading a subscription still works —
-an organization that has never subscribed is `FREE`, which is a state rather than a 404.
+other feature works, and billing endpoints answer `503`. Reading licences still works - an
+organization that has never subscribed holds its one included licence.
 
 ```bash
+# The first purchase. Checkout exists to capture a card, and happens once.
 curl -X POST http://localhost:8080/api/organizations/$ORG_ID/billing/checkout \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"plan":"PRO","seatQuantity":5}'
-# {"sessionId":"cs_...","url":"https://checkout.stripe.com/..."}
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"licenses":5,"interval":"MONTHLY"}'
+# {"sessionId":"cs_...","url":"https://checkout.stripe.com/...","licenseCount":5,"paidLicenses":4,...}
+
+# Growing or shrinking later. No checkout, no redirect - Stripe charges the card on file.
+curl -X PUT http://localhost:8080/api/organizations/$ORG_ID/licenses \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"licenses":8}'
+# {"licenseCount":8,"membersOccupying":4,"vacantLicenses":4,"paidLicenses":7,"billedLicenses":7,...}
 ```
 
-### Plans
+### What changes the bill
 
-The API speaks in plans; Stripe price ids live only in configuration
-(`billing.stripe.prices.PRO`), so a price can be replaced in Stripe without touching code and
-a client can never name a cheaper one. Adding a plan is an enum constant and a config entry.
-`FREE` deliberately has no price — there is nothing to check out.
+| Event | Effect |
+| --- | --- |
+| organization created | 1 member, 1 included licence, no Stripe customer or subscription at all |
+| `POST /billing/checkout` | the first purchase - a card is captured, the webhook activates it |
+| `PUT /licenses` | Stripe charges the saved card and prorates. The only later change |
+| an admin invites, licence vacant | **nothing.** The invitee will occupy a licence already paid for |
+| an admin invites, none vacant | one licence acquired, quantity `+1`, prorated |
+| somebody accepts an invitation | **nothing.** The licence was bought when they were invited |
+| an admin removes a member | **nothing.** The licence is vacated and stays bought |
+| `PUT /licenses` down to `1` | the subscription is **cancelled**; the organization is free again |
+
+Refusals, all `409` with a distinct `title`:
+
+```
+No subscription to add a licence to  { "licenseCount": 1 }
+No licence available                 { "licenseCount": 3, "membersOccupying": 3 }
+Licences are occupied                { "licensesRequested": 6, "minimumLicenses": 7 }
+No subscription yet                  — nothing bought yet; start with checkout
+```
+
+### Reducing, and what is refused
+
+An organization may reduce to exactly what its members occupy and no further:
+
+```
+10 licences, 7 members, 3 vacant
+
+10 → 9   ✓        10 → 6   ✗  409 Licences are occupied, minimumLicenses: 7
+10 → 8   ✓
+10 → 7   ✓
+```
+
+**Nobody is ever removed to satisfy a reduction.** The request is refused instead; the
+administrator removes members first, then reduces.
+
+If licences are cut *outside* the application - in the Stripe dashboard, below the headcount -
+the organization is left over capacity. Everybody stays, `vacantLicenses` reports negative, and
+no new member can join until it is resolved.
+
+### Monthly and annual
+
+The interval belongs to the subscription and is chosen once, at checkout. There is one Stripe
+price per interval and no tiers.
+
+Every licence change sends **only the quantity**, so the price - and therefore the interval -
+is never touched: a monthly subscription stays monthly, an annual one stays annual.
+
+Proration is Stripe's, at `create_prorations`, and there is **no billing arithmetic anywhere in
+this codebase**. A licence added in month nine of an annual term is charged for the remaining
+three; one given up is credited. An annual organization holding 20 licences for 17 members pays
+for all 20 until an administrator removes the three vacant ones.
+
+### Deleting an organization
+
+`DELETE /api/organizations/{orgId}` is a soft delete: the row is tombstoned, and nothing
+belonging to the organization is destroyed — memberships, projects, time entries and the
+licence count all survive.
+
+**The subscription stops renewing**, in the same transaction:
+
+```
+DELETE /api/organizations/{orgId}                        → cancel at period end (default)
+DELETE /api/organizations/{orgId}?cancelImmediately=true → cancel now, Stripe credits the rest
+```
+
+At period end by default because the customer has already paid for it; ending it on the spot
+either takes that away or forces a refund nobody asked for. Either way the organization is
+unreachable from the moment the request returns, so nobody is getting anything for the
+remainder — what differs is only whether they are charged again.
+
+This has to happen *during* the delete. Afterwards every billing endpoint goes through
+`OrganizationAccess`, which refuses a deleted tenant with a 404, so there is no route left to
+stop the money.
+
+If Stripe refuses, the whole delete rolls back and the organization stays alive. That is the
+right way round: an organization that still exists can be deleted again, while one that is
+unreachable *and* still being billed cannot be fixed through the API at all.
+
+### Cancellation, and what happens to licences
+
+Cancelling changes nothing about what the organization can *do* - there are no paid features to
+withdraw. No member is removed, no data is deleted, and no second subscription is created.
+
+The webhook raises `license_count` to match Stripe and **never lowers it**, so an organization
+whose subscription ends keeps its members sitting in their licences. What it *holds* and what it
+is *billed* for simply diverge, and both are reported:
+
+```json
+{ "licenseCount": 4, "membersOccupying": 3, "paidLicenses": 3,
+  "billedLicenses": 0, "subscriptionStatus": "CANCELED" }
+```
+
+Coming back means checking out again, which is the honest price of having stopped paying.
+
+### Ordering, and what can still go wrong
+
+Acquiring a licence calls Stripe **before** the local write commits, inside the same
+transaction - so if Stripe refuses, the invitation rolls back with it. The two failure modes
+are not equal: an over-provisioned licence is a recoverable overcharge, a member nobody is
+paying for is giving the product away.
+
+The cost, stated plainly: that transaction holds the organization's row lock across a
+third-party call. It is bounded by Stripe's timeout and scoped to one organization.
+
+**Concurrency** is a `SELECT … FOR UPDATE` on the *organization* row - not an in-memory lock,
+which would not hold across instances, and not the subscription row, which does not exist while
+the organization is free. It is also the row `license_count` lives on, so the lock and the
+number it guards cannot drift apart.
+
+One subtlety worth knowing: the locked row must be **refreshed**. `OrganizationAccess` has
+already loaded the organization to authorise the request, so Hibernate answers the locked query
+with that same instance - the row lock is taken correctly, but the fields are from before it.
+`OrganizationLicenseService.lockOrganization` does the refresh; nothing should call
+`findAndLockById` directly.
+
+**Webhooks stay authoritative.** A licence change writes the new quantity locally straight away
+so the API reflects it, and the `customer.subscription.updated` event Stripe sends in response
+confirms - or corrects - it moments later. A quantity edited in the Stripe dashboard reaches
+the application the same way. Membership is application data and is never derived from Stripe.
+
+### The price
+
+One price per billing interval — `billing.stripe.prices.MONTHLY` and
+`billing.stripe.prices.ANNUAL` — and each must be an ordinary **per-unit** price. The quantity
+sent already excludes the free included licence, so a graduated tier would discount it twice.
+
+The ids live only in configuration, so a price can be replaced in Stripe without touching code
+and a client can never name a cheaper one. There is no plan enum and no tier: what a customer
+chooses is how often they pay, not what they get.
 
 ### The Stripe customer
 

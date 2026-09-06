@@ -49,7 +49,7 @@ object StripeWebhookSupport {
         subscriptionId: String,
         customerId: String,
         status: String = "active",
-        priceId: String = "price_test_pro",
+        priceId: String = "price_test_monthly",
         quantity: Int = 5,
         currentPeriodStart: Long = 1_760_000_000,
         currentPeriodEnd: Long = 1_762_678_400,

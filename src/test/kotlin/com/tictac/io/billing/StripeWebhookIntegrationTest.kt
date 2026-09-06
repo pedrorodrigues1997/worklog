@@ -140,9 +140,9 @@ class StripeWebhookIntegrationTest : OrganizationApiTest() {
 
         val subscription = subscription()!!
         assertThat(subscription.organizationId).isEqualTo(organizationId)
-        assertThat(subscription.plan).isEqualTo(SubscriptionPlan.PRO)
+        assertThat(subscription.billingInterval).isEqualTo(BillingInterval.MONTHLY)
         assertThat(subscription.status).isEqualTo(SubscriptionStatus.ACTIVE)
-        assertThat(subscription.seatQuantity).isEqualTo(5)
+        assertThat(subscription.paidLicenses).isEqualTo(5)
         assertThat(subscription.providerSubscriptionId).isEqualTo("sub_test_1")
         assertThat(subscription.provider).isEqualTo(BillingProvider.STRIPE)
         // Read off the subscription *item*, which is where the current API puts them.
@@ -171,7 +171,7 @@ class StripeWebhookIntegrationTest : OrganizationApiTest() {
         val subscription = subscription()!!
         assertThat(subscription.id).isEqualTo(originalId)
         assertThat(subscription.status).isEqualTo(SubscriptionStatus.PAST_DUE)
-        assertThat(subscription.seatQuantity).isEqualTo(12)
+        assertThat(subscription.paidLicenses).isEqualTo(12)
         assertThat(subscriptionRepository.count()).isEqualTo(1)
     }
 
@@ -196,7 +196,7 @@ class StripeWebhookIntegrationTest : OrganizationApiTest() {
         assertThat(cancelling.cancelAtPeriodEnd).isTrue()
         assertThat(cancelling.cancelledAt).isEqualTo(Instant.ofEpochSecond(1_761_000_000))
         // Still entitled - they have paid until the period ends.
-        assertThat(cancelling.status.grantsAccess()).isTrue()
+        assertThat(cancelling.status.isBilling()).isTrue()
 
         // ...and when the period actually ends, Stripe says so.
         deliverSigned(
@@ -208,7 +208,7 @@ class StripeWebhookIntegrationTest : OrganizationApiTest() {
 
         val cancelled = subscription()!!
         assertThat(cancelled.status).isEqualTo(SubscriptionStatus.CANCELED)
-        assertThat(cancelled.status.grantsAccess()).isFalse()
+        assertThat(cancelled.status.isBilling()).isFalse()
         // The record survives cancellation; it is not deleted.
         assertThat(subscriptionRepository.count()).isEqualTo(1)
     }
@@ -326,7 +326,7 @@ class StripeWebhookIntegrationTest : OrganizationApiTest() {
         val afterSecond = subscription()!!
         assertThat(afterSecond.id).isEqualTo(id)
         assertThat(afterSecond.updatedAt).isEqualTo(updatedAt)
-        assertThat(afterSecond.seatQuantity).isEqualTo(5)
+        assertThat(afterSecond.paidLicenses).isEqualTo(5)
         assertThat(subscriptionRepository.count()).isEqualTo(1)
         assertThat(billingWebhookEventRepository.count()).isEqualTo(1)
     }
@@ -348,7 +348,7 @@ class StripeWebhookIntegrationTest : OrganizationApiTest() {
         // idempotency this would roll the seat count back to 5.
         deliverSigned(created).andExpect(status().isOk)
 
-        assertThat(subscription()!!.seatQuantity).isEqualTo(20)
+        assertThat(subscription()!!.paidLicenses).isEqualTo(20)
     }
 
     @Test
@@ -364,7 +364,7 @@ class StripeWebhookIntegrationTest : OrganizationApiTest() {
             ),
         ).andExpect(status().isOk)
 
-        assertThat(subscription()!!.seatQuantity).isEqualTo(9)
+        assertThat(subscription()!!.paidLicenses).isEqualTo(9)
         assertThat(billingWebhookEventRepository.count()).isEqualTo(2)
     }
 

@@ -104,6 +104,12 @@ class OrganizationMembershipService(
      * well be a member of other organizations - and so is anything they created here,
      * including the projects themselves.
      *
+     * **The bill does not move.** Seats are bought, not inferred: removing somebody frees the
+     * seat they occupied, and the organization keeps paying for it until an OWNER reduces the
+     * count through the billing API. That is deliberate - an ADMIN removing a colleague should
+     * not silently change what the company is charged, and a team that loses someone on Friday
+     * usually wants the seat waiting on Monday.
+     *
      * A member leaving of their own accord is a different operation with different rules
      * (the owner still could not use it) and is not implemented.
      */

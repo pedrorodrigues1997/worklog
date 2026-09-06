@@ -2,6 +2,7 @@ package com.tictac.io.organization
 
 import com.tictac.io.authentication.RegisterRequest
 import com.tictac.io.authentication.RegistrationService
+import com.tictac.io.billing.OrganizationLicenseService
 import com.tictac.io.common.security.SecureToken
 import com.tictac.io.user.ActiveUser
 import com.tictac.io.user.normalizeEmail
@@ -51,6 +52,7 @@ class InvitationAcceptanceService(
     private val organizationMemberRepository: OrganizationMemberRepository,
     private val registrationService: RegistrationService,
     private val activeUser: ActiveUser,
+    private val organizationLicenseService: OrganizationLicenseService,
 ) {
 
     /**
@@ -128,11 +130,17 @@ class InvitationAcceptanceService(
     }
 
     /**
-     * The two writes, in the order that makes a partial failure harmless.
+     * The writes, in the order that makes a partial failure harmless.
      *
-     * Membership first: if it violates the `(organization_id, user_id)` unique index the
-     * whole transaction rolls back with the invitation still pending, which is recoverable.
-     * The reverse order could consume an invitation for somebody who never got in.
+     * Membership before `accepted_at`: if it violates the `(organization_id, user_id)` unique
+     * index the whole transaction rolls back with the invitation still pending, which is
+     * recoverable. The reverse order could consume an invitation for somebody who never got in.
+     *
+     * The licence check before either, and it is only a check. The licence this person is
+     * about to occupy was acquired when they were *invited*, by the administrator who invited
+     * them - so nothing here reaches Stripe, spends money, or can fail because a payment
+     * provider is slow. If the licence has gone in the meantime the whole transaction rolls
+     * back and the invitation stays usable, so it works again once one is free.
      */
     private fun consume(invitation: OrganizationInvitation, userId: UUID): AcceptedInvitationResponse {
         // The organization may have been closed between the invitation being issued and
@@ -141,6 +149,26 @@ class InvitationAcceptanceService(
         // where the invitee still gets a comprehensible answer.
         val organization = organizationRepository.findByIdAndDeletedAtIsNull(invitation.organizationId)
             ?: throw InvitationNoLongerValidException("The organization this invitation belongs to no longer exists")
+
+        // Serialises this join against every other licence allocation in the organization,
+        // so the counts read below cannot move underneath it. The locked row is returned and
+        // used from here on - it carries `license_count`, and re-reading it unlocked would
+        // defeat the point.
+        val locked = organizationLicenseService.lockOrganization(organization.id!!)
+            ?: throw InvitationNoLongerValidException("The organization this invitation belongs to no longer exists")
+
+        // Before the licence check, not after. Somebody who is already in the organization is
+        // not a new person and is not occupying a second licence - and the unique index would
+        // reject the insert anyway. The index remains the guarantee; this is what makes the
+        // answer say "already a member".
+        if (organizationMemberRepository.findByOrganizationIdAndUserId(organization.id!!, userId) != null) {
+            throw AlreadyOrganizationMemberException()
+        }
+
+        // Purely a check. The licence was acquired at invite time; this catches the cases
+        // where it has since gone - an administrator reduced the count, or somebody else took
+        // it first.
+        organizationLicenseService.requireLicenseForJoiningMember(locked)
 
         val membership = OrganizationMember(
             // From the invitation row, never from the request.

@@ -8,18 +8,22 @@ enum class BillingProvider {
     STRIPE,
 }
 
-/** The plans TicTac sells. Stripe price ids live in configuration, never here. */
-enum class SubscriptionPlan {
-    /** No subscription, or one that has lapsed. The state every organization starts in. */
-    FREE,
-
-    PRO,
-    ;
-
-    companion object {
-        /** The plan an organization has when nothing else is true of it. */
-        val DEFAULT = FREE
-    }
+/**
+ * How often the organization is billed for its licenses.
+ *
+ * This replaced `SubscriptionPlan` (FREE/PRO). **TicTac does not sell feature tiers** - every
+ * organization has every feature, and the only thing money buys is licenses. What is left to
+ * choose is therefore not *what* you get but *how often you pay for it*, which is exactly one
+ * Stripe price each.
+ *
+ * The interval belongs to the subscription and never changes underneath a quantity change:
+ * adding a license updates the item's quantity and leaves its price - and therefore its
+ * interval - alone. Moving between monthly and annual is a price change, which is the billing
+ * portal's job, not this backend's.
+ */
+enum class BillingInterval {
+    MONTHLY,
+    ANNUAL,
 }
 
 /**
@@ -53,17 +57,22 @@ enum class SubscriptionStatus {
     ;
 
     /**
-     * Whether this status means the organization is currently entitled to paid features.
+     * Whether Stripe is currently billing this subscription.
+     *
+     * **This is a billing question and nothing else.** It is never a feature gate: TicTac sells
+     * no paid features, so a CANCELED organization keeps every endpoint, every project and
+     * every time entry it had. What this predicate decides is narrower - whether there is a
+     * live billing relationship to add a license to, and whether the licenses it pays for are
+     * currently being paid for.
+     *
+     * (It replaced `grantsAccess()`, which was named for a feature-entitlement model this
+     * product does not have. Do not reintroduce one on top of it.)
      *
      * [PAST_DUE] counts, and that is the one judgement call in this file: Stripe is still
-     * retrying the card, the customer has not done anything wrong yet, and cutting a paying
-     * team off the instant a renewal blips would be worse than carrying them for the few days
-     * of the retry window. [UNPAID] does not count - that is Stripe having given up.
-     *
-     * Nothing enforces entitlement yet; this is the predicate feature-gating will use, kept
-     * here so the answer is defined in one place when it does.
+     * retrying the card and the customer has not done anything wrong yet. [UNPAID] does not -
+     * that is Stripe having given up.
      */
-    fun grantsAccess(): Boolean = this == ACTIVE || this == TRIALING || this == PAST_DUE
+    fun isBilling(): Boolean = this == ACTIVE || this == TRIALING || this == PAST_DUE
 
     companion object {
         /**
@@ -82,9 +91,9 @@ enum class SubscriptionStatus {
          * canceled           → CANCELED
          * ```
          *
-         * An unrecognised value throws rather than defaulting. Defaulting to ACTIVE would
-         * hand out paid features on a status nobody has read; defaulting to CANCELED would
-         * cut off a paying customer. Failing makes the webhook return non-2xx, which Stripe
+         * An unrecognised value throws rather than defaulting. Defaulting to ACTIVE would say
+         * an organization is paying when it is not; defaulting to CANCELED would say a paying
+         * customer has stopped. Failing makes the webhook return non-2xx, which Stripe
          * surfaces in its dashboard and retries - a loud, visible failure is the only honest
          * response to "Stripe invented a status we have never seen".
          */

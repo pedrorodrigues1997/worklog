@@ -11,7 +11,7 @@ at small and medium companies in the US, Europe and the UAE. JSON REST API only 
 Next.js frontend lives in a **separate repository** and must never be added here.
 
 The customer is the **organisation**, not the individual. One organisation → one
-subscription → a seat quantity. Multi-tenancy and tenant isolation are security
+subscription → a number of licences. Multi-tenancy and tenant isolation are security
 requirements, not UI concerns: a user must never reach another organisation's data by
 editing an id in a request.
 
@@ -73,6 +73,8 @@ com.tictac.io
 ├── billing/
 │   ├── Subscription.kt             a cache of Stripe's state, never the source of truth
 │   ├── BillingCustomer.kt          organization ↔ Stripe customer, + webhook event log
+│   ├── OrganizationLicenses.kt     the licensing arithmetic, in one place
+│   ├── OrganizationLicenseService.kt  acquiring, checking and giving up licences
 │   ├── StripeGateway.kt            the only code that talks to Stripe
 │   └── StripeWebhookService.kt     signature-verified state updates, idempotent
 └── authentication/
@@ -99,10 +101,10 @@ anything, and startup fails if a mapping and a migration have drifted apart.
 | `user_identities` | `(user_id, provider, provider_user_id)` — external logins |
 | `oauth_login_codes` | single-use codes handing an OAuth sign-in to the frontend |
 | `billing_customers` | `(organization_id, provider)` and `(provider, provider_customer_id)` both unique - the only mapping from a Stripe event back to an organisation |
-| `subscriptions` | one per organisation (unique `organization_id`), `plan`, `status`, `seat_quantity`, `provider_subscription_id`, `cancel_at_period_end`. A cache of Stripe |
+| `subscriptions` | one per organisation (unique `organization_id`), `status`, `billing_interval`, `paid_licenses`, `provider_subscription_id`, `provider_item_id`, `cancel_at_period_end`. A cache of Stripe. No `plan` column - there are no tiers |
 | `billing_webhook_events` | `(provider, event_id)` unique - the idempotency guarantee |
 | `organization_invitations` | `id`, `organization_id`, `email`, `invited_by_user_id`, `token_hash`, `expires_at`, `accepted_at`. State is the timestamps - no status column. Partial unique index on `(organization_id, email) WHERE accepted_at IS NULL` |
-| `organizations` | `organization_id`, `organization_name`, `created_at`, `deleted_at` (soft delete) |
+| `organizations` | `organization_id`, `organization_name`, `license_count` (what it holds, ≥ 1), `created_at`, `deleted_at` (soft delete) |
 | `organization_members` | `(organization_id, user_id)` unique, `role`; one OWNER per org via a partial unique index |
 | `projects` | `project_id`, `organization_id`, `project_name`, `description`, `is_active` (archive flag, not a soft delete), `created_at`, `updated_at` |
 | `project_members` | `(project_id, user_id)` unique - assignment of an organisation member to a project. No role, no organisation id |
@@ -318,13 +320,73 @@ them fail, the change is wrong, not the test.
     mapping, and it was written when this backend created the customer.
 43. **Unmappable Stripe input fails loudly** - an unknown status or an unconfigured price
     throws, the webhook answers non-2xx, and Stripe surfaces it. Guessing would either hand
-    out paid features or cut a paying customer off, silently. An unknown *customer* is
-    different: recorded and ignored with a 200, since it is not ours to act on.
+    out licences nobody paid for or misstate the billing interval by a factor of twelve. An
+    unknown *customer* is different: recorded and ignored with a 200, since it is not ours to
+    act on.
 44. **`cancel_at_period_end` is stored separately from `cancelled_at`.** Stripe keeps a
     cancelling subscription `active` until the period ends; `cancelled_at` is when
     cancellation was *requested*, not when access stops. Subscription rows are never deleted.
 45. **No Stripe identifier or secret is ever in a response.** Price ids live in configuration
-    only; the subscription API exposes plan, status, seats and dates.
+    only; the billing API exposes status, interval, licences and dates.
+
+#### Licences
+
+46. **There are no paid features.** Every organisation has every feature on every plan - so
+    there is no plan. The only thing money buys is **licences**: room for more people.
+    `SubscriptionStatus.isBilling()` says whether Stripe is charging and is **never** a
+    feature gate; do not reintroduce one on top of it. (It replaced `grantsAccess()`, whose
+    name implied the entitlement model this product does not have.)
+47. **A licence is not a member, and a member is not a licence.** `organizations.license_count`
+    is what the organisation holds; `organization_members` is who is in them; a **vacant**
+    licence is one with nobody in it. Removing a member *vacates* a licence and never removes
+    one - the organisation keeps paying, and the next person moves straight into it. The
+    arithmetic lives only in `OrganizationLicenses`.
+48. **`paid_licenses = license_count - 1`, and that is the Stripe quantity.** The first licence
+    is included free, so a flat per-unit price is all Stripe needs. The quantity is **not** the
+    licence count - do not "simplify" it to match, or every organisation is billed for one
+    licence too many.
+49. **`license_count` is never derived from the member count.** That was the old model, and it
+    is what made a vacant licence impossible to represent. It moves only when somebody buys or
+    gives up a licence.
+50. **A licence is acquired when an invitation is *issued*, not accepted.** If one is vacant it
+    is reused for free; if none is, one is bought there and then. This is why the person
+    spending money is always an authorised administrator and never the invitee, whose click
+    would otherwise charge the company's card.
+51. **An outstanding invitation is holding a licence.** `licensesAvailable` subtracts both
+    members and un-accepted, un-expired invitations. Counting only members would let two
+    invitations issued back to back both be promised the same vacant licence.
+52. **Licences are given up only through `PUT /licenses`**, OWNER or ADMIN, and reducing stops
+    at `minimumLicensesFor(members)`. Never remove a member to satisfy a reduction - refuse it.
+    Being *over* capacity (a quantity cut in the Stripe dashboard) is tolerated and visible:
+    nobody is turned out, and no new member can join until it is resolved.
+53. **Reducing to 1 cancels the subscription** rather than leaving it at quantity zero, which
+    Stripe does not treat as reliably free and which still reads as paid.
+54. **One organisation, one Stripe customer, one subscription** - its quantity changed, never
+    replaced. Never a second subscription, never a user-level one, and never derive membership
+    from Stripe.
+55. **The billing interval lives on the subscription and survives every licence change.** Only
+    the quantity is ever sent; the price - and therefore monthly-versus-annual - is untouched.
+    Proration is Stripe's, at `create_prorations`, and there is no billing arithmetic anywhere
+    in this codebase.
+56. **A subscription ending takes nobody's licence away.** The webhook raises `license_count`
+    to match Stripe and never lowers it, so a cancelled or unpaid organisation keeps its
+    members, its data and every feature. What it *holds* and what it is *billed* for simply
+    diverge, and both are reported.
+57. **Deleting an organisation stops its subscription renewing, in the same transaction.**
+    Cancellation is **at period end** by default - the period is already paid for, and taking
+    it back or refunding it unasked is worse than simply not charging again;
+    `?cancelImmediately=true` overrides. This has to happen *during* the delete: afterwards
+    every billing endpoint goes through `OrganizationAccess`, which refuses a deleted tenant,
+    so there would be no way to stop the money at all. If Stripe refuses, the delete rolls
+    back - an organisation that is still alive can be deleted again, one that is unreachable
+    *and* still billed cannot be fixed.
+58. **Licence allocation serialises on `organizations` via `SELECT ... FOR UPDATE`** - not the
+    subscription row, which does not exist while the organisation is free, and not an
+    in-memory lock, which would not hold across instances. **The locked row must be
+    refreshed**: `OrganizationAccess` has already loaded the organisation, so Hibernate answers
+    the locked query with that instance and `license_count` would be read from before the lock.
+    `OrganizationLicenseService.lockOrganization` does the refresh; use it rather than
+    `findAndLockById` directly.
 
 ### OAuth flow, in one picture
 
@@ -366,7 +428,7 @@ must be the `jdbc:postgresql://…` form.
 docker compose up -d                 # PostgreSQL 17 on :5432
 set -a; source .env; set +a
 ./mvnw spring-boot:run
-./mvnw clean verify                  # 605 tests; Docker must be running
+./mvnw clean verify                  # 690 tests; Docker must be running
 ```
 
 - **Real PostgreSQL via Testcontainers.** No in-memory substitute — it would not catch a
@@ -389,8 +451,13 @@ set -a; source .env; set +a
 - **Never mock away Stripe webhook signature verification.** `StripeWebhookIntegrationTest`
   signs payloads the way Stripe does and runs the real check; that endpoint is public and
   writes billing state, so a stubbed verification would test nothing that matters. Only
-  `StripeGateway` - the one component that makes a network call - is replaced, and only in
-  the checkout/portal tests.
+  `StripeGateway` - the one component that makes a network call - is replaced, and only where
+  a network call would otherwise happen.
+- `LicenseLifecycleWalkthroughIntegrationTest` is the end-to-end one: it drives the whole
+  licence lifecycle through HTTP and asserts the state after every step. It stubs
+  `verifyAndParse` to parse the payload the way Stripe's own `constructEvent` does after
+  verifying - keeping it in the shared Spring context, since duplicating signature coverage
+  would cost a second context for nothing.
 - The external provider is stubbed at the `OidcUser` / `OAuth2AuthenticationToken` boundary —
   i.e. from verified claims onward. Nothing contacts Google.
 - Test config is `src/test/resources/application-test.properties` + `@ActiveProfiles("test")`,
@@ -443,10 +510,11 @@ Do not add these speculatively; each is its own task.
 Clients · tasks · reports · CSV export · email sending (Resend) · **CORS** · frontend code of
 any kind.
 
-Billing exists (invariants 39-45), but **seat enforcement does not**: `seat_quantity` is what
-was purchased, and nothing compares it to the member count or blocks anything. Entitlement is
-computed (`SubscriptionStatus.grantsAccess`) and never enforced. Both are deliberate - they
-are pricing decisions, not code decisions.
+Billing exists (invariants 39-58) and **organisation size is the only thing it buys**
+(46-58): an administrator holds a number of licences, members occupy them, removing somebody
+leaves a vacant licence, and inviting past capacity acquires another. Nothing is gated -
+there are no paid features, and `SubscriptionStatus.isBilling()` answers "is Stripe charging",
+never "may this organisation do X".
 
 Organisations, memberships and organisation roles now exist (see the invariants in §5).
 Ownership transfer and account closure exist too (invariants 15-17), projects and project
@@ -485,8 +553,37 @@ Known open items in what *is* built:
   endpoint. That must stop being returned the moment a mail provider is wired up.
 - An invitation only ever grants MEMBER; there is no way to invite an ADMIN directly, so a
   new administrator has to be invited and then promoted.
-- Nothing enforces seats or entitlement. An organisation on FREE has every feature, and one
-  with 5 seats can have 50 members. `grantsAccess()` is where the gate goes when there is one.
+- A membership row for a *closed* account still occupies a licence: the count is rows, and
+  the licence is held until an administrator removes the membership. That is coherent but it
+  means the billed count can exceed what the member listing shows, since that filters closed
+  accounts. Decide which one is "the members" before anyone notices on an invoice.
+- Nothing enforces *entitlement* - a PAST_DUE or CANCELED organisation keeps working, and
+  keeps its members. `isBilling()` is where that gate would go if it were ever wanted; the
+  deliberate choice today is that only organisation size is paid for.
+- A licence change writes locally and lets the webhook confirm. Between the two the local
+  quantity is optimistic; if Stripe applied a different quantity the webhook corrects it, but
+  there is no alarm if it never arrives.
+- Vacant licences are invisible until somebody looks. A team that loses three people keeps
+  paying for three empty licences - correct, and the point of the model - but nothing nudges
+  anyone about it beyond `vacantLicenses` in the API.
+- An organisation over capacity (a quantity cut in the Stripe dashboard below the people in
+  it) keeps everybody and reports a negative `vacantLicenses`. Nobody is turned out, and no
+  new member can join until it is resolved. Decide whether the product wants to nag.
+- There is no buy-and-invite in one step: an administrator of a free organisation gets a 409
+  on inviting, has to check out, and then invites. Sequencing that is the frontend's problem
+  today.
+- Coming back after cancelling means checking out again - the cancelled row is not resizable,
+  so `PUT /licenses` refuses it. That path works and is tested, but the organisation keeps its
+  old `license_count` in the meantime, so it reads as holding licences nobody is billed for.
+- Inviting somebody past capacity holds the organisation's row lock across a Stripe call. It
+  is bounded by Stripe's timeout and scoped to one organisation, and the alternative - a
+  member nobody is paying for - is worse. Worth knowing before invitations get bulk-imported.
+- There is no proration preview: an administrator adding a fifth colleague is not told what it
+  will cost before it happens. Stripe bills the difference immediately.
+- Licence changes are not audited. Who bought or gave up a licence, and when, exists only in
+  Stripe's invoice history.
+- No proration preview: an owner adding their fifth colleague is not told what it will cost
+  before it happens. Stripe bills the difference immediately.
 - `billing_webhook_events` grows without bound. It only needs to outlive Stripe's retry
   window, so it wants the same scheduled cleanup `refresh_tokens` has.
 - Downgrades, plan changes and proration are Stripe's to perform through the billing portal;
@@ -495,7 +592,7 @@ Known open items in what *is* built:
   keeps it, which is the right place for it, but reporting on it later means calling Stripe.
 - Account closure keeps non-owner membership rows, by decision (see `AccountClosureService`).
   They are inert and invisible, but an organisation's member count and its
-  `organization_members` row count therefore differ. Seat counting must go through
+  `organization_members` row count therefore differ. Licence occupancy must go through
   `users.deleted_at`; do not count rows.
 - No "leave organisation" for a non-owner. An admin can remove them, but they cannot walk out
   on their own, and the only self-service exit is closing the account entirely.
@@ -504,8 +601,13 @@ Known open items in what *is* built:
 - A soft-deleted organisation may be owned by a closed account. Deliberate: it is unreachable
   either way, and blocking closure on it would be a dead end since transfer refuses deleted
   organisations too. Revisit if organisation restore is ever built.
-- Organisation soft delete leaves everything else in place, including memberships and
-  projects. There is no restore and no purge.
+- Organisation soft delete leaves everything else in place, including memberships, projects
+  and the licence count. There is no restore and no purge. It *does* stop the subscription
+  renewing (invariant 57) - but an organisation soft-deleted **before** that existed is still
+  being billed and cannot be reached to fix it; those have to be cancelled in the Stripe
+  dashboard.
+- Cancelling at period end means a deleted organisation keeps a live subscription for up to a
+  month. Nothing surfaces that, and there is no "undo the deletion before it lapses".
 - Projects have no per-project roles. Everyone assigned to a project has the same standing in
   it, and what they may *do* to it comes from their organisation role. Adding a project role
   now would be a permission framework built ahead of any requirement for one.

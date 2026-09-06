@@ -1,5 +1,6 @@
 package com.tictac.io.organization
 
+import com.tictac.io.billing.OrganizationLicenses
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
 import jakarta.persistence.GeneratedValue
@@ -32,6 +33,20 @@ class Organization(
     @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "organization_id", nullable = false, updatable = false)
     var id: UUID? = null
+
+    /**
+     * Licenses this organization holds - the count it pays for, not the count it is using.
+     *
+     * Starts at [OrganizationLicenses.INCLUDED_LICENSES]: every organization gets one free,
+     * which is what lets a one-person company exist with no Stripe relationship at all.
+     *
+     * Deliberately **not** derived from the member count. A member occupies a license; removing
+     * them vacates it and leaves this number alone, so the organization keeps what it bought
+     * until an administrator gives it up. Changing it is a billing operation and belongs to
+     * [com.tictac.io.billing.OrganizationLicenseService] - nothing else may write it.
+     */
+    @Column(name = "license_count", nullable = false)
+    var licenseCount: Int = OrganizationLicenses.INCLUDED_LICENSES.toInt()
 
     @Column(name = "created_at", nullable = false, updatable = false)
     var createdAt: Instant = Instant.now()

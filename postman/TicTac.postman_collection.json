@@ -1,0 +1,2449 @@
+{
+  "info": {
+    "name": "TicTac — licences, billing and onboarding",
+    "description": "Manual test collection for the TicTac backend.\n\n## Run order\n\nFolders are numbered. Run them top to bottom the first time — later requests depend on variables captured by earlier ones (`ownerAccessToken`, `organizationId`, `invitationToken`, …).\n\n## Emails are generated per run\n\nA collection pre-request script sets `runId` once and derives `ownerEmail` / `inviteeEmail` from it, so registering twice does not collide. **To start a completely fresh run, delete the `runId` collection variable.** To use your own addresses, set `ownerEmail` / `inviteeEmail` in the ENVIRONMENT — environment values win over collection ones.\n\n## What needs Stripe\n\nFolders 01–03 work against a bare local server. Folders 04–06 need billing configured and a live subscription. See `postman/README.md` in the repo for both the Stripe CLI route and a SQL shortcut that skips Stripe entirely.\n\n## Requests that are SUPPOSED to fail\n\nAnything named `(negative)` asserts a 4xx. They are the interesting ones: they prove a non-member gets 404 rather than 403, that an invitation cannot be replayed, and that money cannot be spent by the wrong person.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// One run id per collection run, so re-registering never collides.",
+          "// Delete the `runId` collection variable to start a completely fresh run.",
+          "if (!pm.collectionVariables.get('runId')) {",
+          "  const id = Date.now().toString(36);",
+          "  pm.collectionVariables.set('runId', id);",
+          "  pm.collectionVariables.set('ownerEmail', 'owner+' + id + '@tictac.test');",
+          "  pm.collectionVariables.set('inviteeEmail', 'invitee+' + id + '@tictac.test');",
+          "  console.log('New run', id, '— owner+' + id + '@tictac.test');",
+          "}"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// A 503 anywhere in billing means STRIPE_SECRET_KEY is not set.",
+          "if (pm.response.code === 503) {",
+          "  console.warn('503 — billing is not configured. Set STRIPE_SECRET_KEY,',",
+          "               'STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_MONTHLY, STRIPE_PRICE_ANNUAL',",
+          "               'and restart the app.');",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "runId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "ownerEmail",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "inviteeEmail",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "ownerUserId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "ownerAccessToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "ownerRefreshToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "inviteeUserId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "inviteeAccessToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "inviteeRefreshToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "organizationId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "invitationId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "invitationToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "projectId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "categoryId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "timeEntryId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "checkoutUrl",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "portalUrl",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "01 · Auth — owner",
+      "item": [
+        {
+          "name": "Register owner",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/register",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "register"
+              ]
+            },
+            "description": "Creates the account that will own the organization.\n\nEmails are generated per run (see the collection pre-request script), so this can be re-run without hitting `409 Email already registered`. To start a completely fresh run, clear the `runId` collection variable.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"Ada\",\n  \"lastName\": \"Lovelace\",\n  \"email\": \"{{ownerEmail}}\",\n  \"password\": \"{{ownerPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () { pm.response.to.have.status(201); });",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('ownerUserId', b.id);",
+                  "pm.test('returns no password or hash', function () {",
+                  "  pm.expect(pm.response.text()).to.not.include('password');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login owner",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Returns the access token (15 min) and the refresh token (opaque, 30 days).\n\nBoth are captured into collection variables; every later request uses them.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{ownerEmail}}\",\n  \"password\": \"{{ownerPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('ownerAccessToken', b.accessToken);",
+                  "pm.collectionVariables.set('ownerRefreshToken', b.refreshToken);",
+                  "pm.test('token type is Bearer', function () { pm.expect(b.tokenType).to.eql('Bearer'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Who am I",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/users/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "users",
+                "me"
+              ]
+            },
+            "description": "Resolves the token's `sub` to a live account. The user id is never taken from the request."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "const b = pm.response.json();",
+                  "pm.test('is the owner', function () {",
+                  "  pm.expect(b.id).to.eql(pm.collectionVariables.get('ownerUserId'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Refresh tokens",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/refresh",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "refresh"
+              ]
+            },
+            "description": "Rotates BOTH tokens. The old refresh token is now spent — replaying it is treated as theft and revokes every session for that user, so do not run this twice in a row with a stale value.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{ownerRefreshToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('ownerAccessToken', b.accessToken);",
+                  "pm.collectionVariables.set('ownerRefreshToken', b.refreshToken);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login without a token is rejected (negative)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/users/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "users",
+                "me"
+              ]
+            },
+            "description": "No Authorization header. Everything outside the public auth POSTs is default-deny."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', function () { pm.response.to.have.status(401); });"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "Register → login → refresh. Run these first; everything else needs `ownerAccessToken`."
+    },
+    {
+      "name": "02 · Organization",
+      "item": [
+        {
+          "name": "Create organization",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations"
+              ]
+            },
+            "description": "The caller becomes OWNER in the same transaction. An organization with no owner is unfixable through the API, so the two are never separate.\n\nIt starts holding **one licence** — the free included one — and has no Stripe customer or subscription at all.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Acme Consulting\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () { pm.response.to.have.status(201); });",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('organizationId', b.id);",
+                  "pm.test('caller is OWNER', function () { pm.expect(b.role).to.eql('OWNER'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List my organizations",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get organization",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Rename organization",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Acme Consulting Ltd\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List members",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/members",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "members"
+              ]
+            },
+            "description": "One member for now: the owner, occupying the free included licence."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('one member so far', function () {",
+                  "  pm.expect(pm.response.json().length).to.be.at.least(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Another tenant is a 404, not a 403 (negative)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/11111111-1111-1111-1111-111111111111",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "11111111-1111-1111-1111-111111111111"
+              ]
+            },
+            "description": "A non-member gets 404. A 403 here would turn a leaked organization id into an existence oracle for that tenant."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', function () { pm.response.to.have.status(404); });"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "Creating the tenant everything else hangs off."
+    },
+    {
+      "name": "03 · Licences — the free organization",
+      "item": [
+        {
+          "name": "Get licences",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/licenses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "licenses"
+              ]
+            },
+            "description": "A brand-new organization: 1 licence held, 1 member occupying it, 0 vacant, 0 billed."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "const b = pm.response.json();",
+                  "pm.test('one included licence', function () { pm.expect(b.licenseCount).to.eql(1); });",
+                  "pm.test('nothing vacant', function () { pm.expect(b.vacantLicenses).to.eql(0); });",
+                  "pm.test('nothing billed', function () { pm.expect(b.billedLicenses).to.eql(0); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get subscription",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/subscription",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "subscription"
+              ]
+            },
+            "description": "'Never subscribed' is a state, not a 404. `status` is absent and `billing` is false, but the organization still holds its included licence."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('not billing', function () { pm.expect(pm.response.json().billing).to.eql(false); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Invite before subscribing → 409 (negative)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/invitations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "invitations"
+              ]
+            },
+            "description": "**Expected to fail.** The one included licence is occupied by the owner, and there is no card on file to buy another — so the licence cannot be acquired.\n\nNote the refusal happens at INVITE time, not acceptance: the administrator finds out at the moment they decide, and no dead link goes out.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{inviteeEmail}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', function () { pm.response.to.have.status(409); });",
+                  "const b = pm.response.json();",
+                  "pm.test('says why', function () {",
+                  "  pm.expect(b.title).to.eql('No subscription to add a licence to');",
+                  "});",
+                  "pm.test('no invitation was created', function () {",
+                  "  pm.expect(b.licenseCount).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Change licences before subscribing → 409 (negative)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/licenses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "licenses"
+              ]
+            },
+            "description": "**Expected to fail.** Licences are added to an existing subscription; the first purchase must go through checkout, because there is no card yet.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"licenses\": 5\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', function () { pm.response.to.have.status(409); });",
+                  "pm.test('says why', function () {",
+                  "  pm.expect(pm.response.json().title).to.eql('No subscription yet');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "What a brand-new organization looks like, and the two things it cannot do yet.\n\nBoth negatives here are the point of the model: nothing is gated except headcount, and headcount needs a card."
+    },
+    {
+      "name": "04 · Stripe — checkout and portal",
+      "item": [
+        {
+          "name": "Create checkout session — MONTHLY",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/billing/checkout",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "billing",
+                "checkout"
+              ]
+            },
+            "description": "Buys the organization's FIRST licences. `licenses` is the total it will hold, so Stripe's quantity is 4 — the first licence is included free.\n\n**This activates nothing.** It returns a URL to send a browser to. The subscription becomes real only when Stripe confirms over a signed webhook.\n\nOpen `checkoutUrl` from the collection variables in a browser and pay with the test card `4242 4242 4242 4242`, any future expiry, any CVC.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"licenses\": 5,\n  \"interval\": \"MONTHLY\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('checkoutUrl', b.url);",
+                  "pm.test('quantity excludes the free licence', function () {",
+                  "  pm.expect(b.licenseCount).to.eql(5);",
+                  "  pm.expect(b.paidLicenses).to.eql(4);",
+                  "});",
+                  "console.log('Open this to pay:', b.url);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create checkout session — ANNUAL",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/billing/checkout",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "billing",
+                "checkout"
+              ]
+            },
+            "description": "Same thing on the annual price. The interval is chosen once, here, and every later licence change leaves it alone.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"licenses\": 5,\n  \"interval\": \"ANNUAL\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('checkoutUrl', b.url);",
+                  "pm.test('interval is annual', function () { pm.expect(b.interval).to.eql('ANNUAL'); });",
+                  "console.log('Open this to pay:', b.url);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Open billing portal",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/billing/portal",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "billing",
+                "portal"
+              ]
+            },
+            "description": "**OWNER only** — narrower than licence management, because this is cards, invoices and cancellation rather than headcount.\n\nNo request body. Creates the Stripe customer if the organization does not have one yet, so this works even before any purchase.\n\n⚠️ Stripe returns an error until you have SAVED the portal configuration once, in Dashboard → Settings → Billing → Customer portal. See the collection README; a `502 Billing provider error` here almost always means that."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('portalUrl', b.url);",
+                  "console.log('Open the portal:', b.url);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "An admin cannot open the portal (negative)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{inviteeAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/billing/portal",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "billing",
+                "portal"
+              ]
+            },
+            "description": "Run this after the invitee has joined and been promoted to ADMIN. An ADMIN may buy and change licences but not touch the payment instrument."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 403', function () { pm.response.to.have.status(403); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Stripe webhook (reference only — do not send by hand)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/webhooks/stripe",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "webhooks",
+                "stripe"
+              ]
+            },
+            "description": "**Do not fire this from Postman.** The endpoint's entire authentication is an HMAC-SHA256 signature over the raw body, so an unsigned request is correctly rejected with 400.\n\nTo receive real events locally:\n\n```\nstripe listen --forward-to localhost:8080/api/webhooks/stripe\n```\n\nCopy the `whsec_...` it prints into `STRIPE_WEBHOOK_SECRET` and restart the app. Completing a checkout then writes the subscription and raises `license_count`.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"Use the Stripe CLI. See description.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('unsigned bodies are refused', function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([400, 503]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "Checkout captures a card ONCE. Everything after it — more licences, fewer licences — is `PUT /licenses`, which charges the saved card with no redirect.\n\n**Nothing in folders 05–07 will work until a subscription actually exists.** Either complete a checkout with the Stripe CLI listening, or use the SQL shortcut in the README."
+    },
+    {
+      "name": "05 · Licences — with a subscription",
+      "item": [
+        {
+          "name": "Get licences",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/licenses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "licenses"
+              ]
+            },
+            "description": "After a completed checkout for 5: 5 held, 1 occupied, 4 vacant, 4 billed."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "const b = pm.response.json();",
+                  "console.log('held', b.licenseCount, '| members', b.membersOccupying,",
+                  "            '| vacant', b.vacantLicenses, '| billed', b.billedLicenses);",
+                  "pm.test('vacant = held - members', function () {",
+                  "  pm.expect(b.vacantLicenses).to.eql(b.licenseCount - b.membersOccupying);",
+                  "});",
+                  "pm.test('billed = held - 1 free', function () {",
+                  "  pm.expect(b.paidLicenses).to.eql(b.licenseCount - 1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Raise licence count to 8",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/licenses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "licenses"
+              ]
+            },
+            "description": "**No checkout, no redirect, no card re-entry.** Stripe charges the card on file and prorates for the rest of the period — monthly or annual alike.\n\nThe body is the whole count, not a delta, so sending it twice does nothing the second time.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"licenses\": 8\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "const b = pm.response.json();",
+                  "pm.test('holds 8', function () { pm.expect(b.licenseCount).to.eql(8); });",
+                  "pm.test('billed for 7', function () { pm.expect(b.paidLicenses).to.eql(7); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Set the same count again (no-op)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/licenses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "licenses"
+              ]
+            },
+            "description": "Idempotent: the count is set, never incremented, so Stripe is not called at all.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"licenses\": 8\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reduce below the members occupying → 409 (negative)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/licenses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "licenses"
+              ]
+            },
+            "description": "**Expected to fail** — with 400, because 0 licences is not a thing: the free included licence always exists. To stop paying entirely, ask for `1`, which cancels.\n\nFor the 409 version, get two members into the organization first (folder 06) and then try to reduce to 1.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"licenses\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', function () { pm.response.to.have.status(400); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reduce to 1 — cancels the subscription",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/licenses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "licenses"
+              ]
+            },
+            "description": "Giving up the last paid licence CANCELS the subscription rather than leaving it at quantity zero — Stripe does not treat zero as reliably free, and it still reads as paid in the dashboard.\n\n⚠️ Run this last. Coming back means checking out again.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"licenses\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('back to the free licence', function () {",
+                  "  pm.expect(pm.response.json().licenseCount).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "A member cannot change licences (negative)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{inviteeAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/licenses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "licenses"
+              ]
+            },
+            "description": "Run after the invitee has joined as MEMBER. Only OWNER and ADMIN may spend money.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"licenses\": 20\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 403', function () { pm.response.to.have.status(403); });"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "These need a live subscription — see folder 04.\n\nThe rule being demonstrated: **the licence count only ever moves because somebody asked it to.** Members joining and leaving never touch it."
+    },
+    {
+      "name": "06 · Invitations — adding a user",
+      "item": [
+        {
+          "name": "Invite a user",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/invitations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "invitations"
+              ]
+            },
+            "description": "OWNER or ADMIN. **This is where money moves**: if a licence is vacant the invitee will reuse it for free; if none is, one is acquired now and Stripe's quantity goes up by one.\n\nThe raw token is returned in the response only because email delivery does not exist yet — it is never stored and never logged. It is captured into `invitationToken`.\n\nAn invitation always grants MEMBER. There is no role field, deliberately: letting an inviter choose would let an ADMIN mint an ADMIN through a side door.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{inviteeEmail}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () { pm.response.to.have.status(201); });",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('invitationToken', b.token);",
+                  "pm.collectionVariables.set('invitationId', b.id);",
+                  "pm.test('token is a 43-char URL-safe secret', function () {",
+                  "  pm.expect(b.token).to.match(/^[A-Za-z0-9_-]{43}$/);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Check licences after inviting",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/licenses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "licenses"
+              ]
+            },
+            "description": "`pendingInvitations` is 1, and `licensesAvailable` has dropped even though nobody has joined yet: **an outstanding invitation holds a licence**. Without that, two invitations issued back to back would both be promised the same vacant licence."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "const b = pm.response.json();",
+                  "pm.test('the invitation is holding a licence', function () {",
+                  "  pm.expect(b.pendingInvitations).to.be.above(0);",
+                  "  pm.expect(b.licensesAvailable).to.eql(b.vacantLicenses - b.pendingInvitations);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Register with the wrong email → 422 (negative)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "**Expected to fail.** The invitation was issued to `{{inviteeEmail}}`; an account cannot be created at a different address on the back of it.\n\nRun this BEFORE the accept above, while the invitation is still unconsumed.",
+            "url": {
+              "raw": "{{baseUrl}}/api/invitations/register",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "invitations",
+                "register"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{invitationToken}}\",\n  \"firstName\": \"Mallory\",\n  \"lastName\": \"Impostor\",\n  \"email\": \"someone-else@tictac.test\",\n  \"password\": \"{{inviteePassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 422', function () { pm.response.to.have.status(422); });",
+                  "pm.test('says why', function () {",
+                  "  pm.expect(pm.response.json().title).to.eql('Invitation email mismatch');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Invitee registers AND accepts (new account)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/invitations/register",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "invitations",
+                "register"
+              ]
+            },
+            "description": "**Public** — no Authorization header. Creates the account and consumes the invitation in one transaction.\n\n`email` is required and must match the address the invitation was issued to — a mismatch is 422. It is not proof of identity (possession of the token is what proves you have the link); it is asked for because creating an account needs every field registration needs, and it is checked so an account cannot be created at a different address than the one invited.\n\nThere is deliberately **no `organizationId`** — that comes off the invitation row, so there is no parameter to steer an acceptance into another tenant.\n\nUse this OR the next request, not both — an invitation is single-use.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{invitationToken}}\",\n  \"firstName\": \"Grace\",\n  \"lastName\": \"Hopper\",\n  \"email\": \"{{inviteeEmail}}\",\n  \"password\": \"{{inviteePassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () { pm.response.to.have.status(201); });",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('inviteeUserId', b.userId);",
+                  "pm.test('joined as MEMBER', function () { pm.expect(b.role).to.eql('MEMBER'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "…or an existing user accepts",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{inviteeAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/invitations/accept",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "invitations",
+                "accept"
+              ]
+            },
+            "description": "**Authenticated** — the caller's own email must be the invited one, compared against the account behind a verified token and never against anything in the body.\n\nThis lives on the authenticated chain on purpose: the public POST chain ignores the Authorization header entirely, so acceptance-as-an-existing-user cannot live there.\n\nUse this only if the invitee already had an account — otherwise use the request above.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{invitationToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('inviteeUserId', b.userId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login invitee",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Captures `inviteeAccessToken` so the negative authorization checks elsewhere can run.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{inviteeEmail}}\",\n  \"password\": \"{{inviteePassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('inviteeAccessToken', b.accessToken);",
+                  "pm.collectionVariables.set('inviteeRefreshToken', b.refreshToken);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Replay the invitation → 409 (negative)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{inviteeAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/invitations/accept",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "invitations",
+                "accept"
+              ]
+            },
+            "description": "**Expected to fail.** Acceptance is single-use, serialised by a row lock on the invitation.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{invitationToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', function () { pm.response.to.have.status(409); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List members — now two",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/members",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "members"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('two members', function () {",
+                  "  pm.expect(pm.response.json().length).to.eql(2);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Licences after the join",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/licenses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "licenses"
+              ]
+            },
+            "description": "Two members occupying, one fewer vacant, and **`billedLicenses` is unchanged** — the licence was paid for when the invitation went out, not when it was accepted."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "const b = pm.response.json();",
+                  "pm.test('two occupied', function () { pm.expect(b.membersOccupying).to.eql(2); });",
+                  "pm.test('nothing pending any more', function () {",
+                  "  pm.expect(b.pendingInvitations).to.eql(0);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Promote the invitee to ADMIN",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/members/{{inviteeUserId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "members",
+                "{{inviteeUserId}}"
+              ]
+            },
+            "description": "An invitation only ever grants MEMBER, so a new administrator is invited and then promoted. OWNER is never assignable this way — moving ownership is its own operation.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"ADMIN\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Remove the member — vacates, does not un-buy",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/members/{{inviteeUserId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "members",
+                "{{inviteeUserId}}"
+              ]
+            },
+            "description": "**The rule that matters most.** The licence becomes vacant and the organization keeps paying for it, so the next person moves straight into it with nothing to buy.\n\nCheck `GET /licenses` afterwards: `membersOccupying` drops, `licenseCount` and `billedLicenses` do not."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204', function () { pm.response.to.have.status(204); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Licences after the removal",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/licenses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "licenses"
+              ]
+            },
+            "description": "One vacant licence, still billed. Re-run 'Invite a user' with a different address and watch it be reused for free — no Stripe call at all."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "const b = pm.response.json();",
+                  "pm.test('a licence is now vacant', function () {",
+                  "  pm.expect(b.vacantLicenses).to.be.above(0);",
+                  "});",
+                  "console.log('held', b.licenseCount, '| members', b.membersOccupying,",
+                  "            '| vacant', b.vacantLicenses, '| still billed', b.billedLicenses);"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "The full onboarding round trip: invite → accept → promote → remove.\n\nNeeds a live subscription with a spare licence (folder 04). Use EITHER 'registers AND accepts' OR '…existing user accepts' — an invitation is single-use."
+    },
+    {
+      "name": "07 · Projects and time tracking",
+      "item": [
+        {
+          "name": "Create project",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/projects",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "projects"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Website Redesign\",\n  \"description\": \"Q3 rebuild\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('projectId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Assign myself to the project",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/projects/{{projectId}}/members",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "projects",
+                "{{projectId}}",
+                "members"
+              ]
+            },
+            "description": "Organization membership grants nothing at project level. Administrators can reach every project without being assigned, but tracking time is a separate question.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{ownerUserId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () { pm.response.to.have.status(201); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create a category",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/projects/{{projectId}}/categories",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "projects",
+                "{{projectId}}",
+                "categories"
+              ]
+            },
+            "description": "A category is a KIND of work, not a unit of work — this is a time tracker, not a task manager.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Development\",\n  \"description\": \"Writing code\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('categoryId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Start the timer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/time-entries/timer",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "time-entries",
+                "timer"
+              ]
+            },
+            "description": "`startedAt` is server time — no request DTO anywhere accepts a timestamp or a duration, so a client-supplied value has nowhere to land.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"projectId\": \"{{projectId}}\",\n  \"projectCategoryId\": \"{{categoryId}}\",\n  \"title\": \"Rebuilding the nav\",\n  \"billable\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('timeEntryId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get the running timer",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/time-entries/timer",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "time-entries",
+                "timer"
+              ]
+            },
+            "description": "A running timer is just a row with `ended_at IS NULL`. Elapsed time is computed on read; the browser is never the source of truth."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Stop the timer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/time-entries/{{timeEntryId}}/stop",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "time-entries",
+                "{{timeEntryId}}",
+                "stop"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create a manual entry",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/time-entries",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "time-entries"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"projectId\": \"{{projectId}}\",\n  \"title\": \"Yesterday's standup\",\n  \"startedAt\": \"2026-09-05T09:00:00Z\",\n  \"endedAt\": \"2026-09-05T09:30:00Z\",\n  \"billable\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () { pm.response.to.have.status(201); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List time entries",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/time-entries?page=0&size=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "time-entries"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "0"
+                },
+                {
+                  "key": "size",
+                  "value": "20"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Everything still works with no subscription",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/projects",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "projects"
+              ]
+            },
+            "description": "Worth running after cancelling in folder 05. **There are no paid features** — a cancelled organization has exactly the same functionality as a paying one. The only thing money buys is licences."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "Not billing, but useful for proving the point that nothing here is gated by the subscription."
+    },
+    {
+      "name": "08 · Teardown",
+      "item": [
+        {
+          "name": "Logout owner",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/logout",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "logout"
+              ]
+            },
+            "description": "Public POST, and the chain deliberately ignores any Authorization header: clients attach their access token to everything, and a STALE one must not fail authentication before logout can run — which is exactly when logout matters.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{ownerRefreshToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204', function () { pm.response.to.have.status(204); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Soft-delete the organization",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}"
+              ]
+            },
+            "description": "OWNER only. Soft delete — the row is tombstoned and nothing is destroyed: memberships, projects, time entries and the licence count all survive. There is no restore and no purge.\n\n**Any active subscription stops renewing**, in the same transaction. At period end by default — the customer has already paid for it — so `cancelAtPeriodEnd` becomes true while the status stays ACTIVE until Stripe actually ends it.\n\nIt has to happen here: afterwards every billing endpoint 404s, because the tenant is gone. Check with the next request.\n\nRun 'Login owner' again first if the logout above already spent the session."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204', function () { pm.response.to.have.status(204); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "…or delete and cancel immediately",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "description": "The opt-in alternative: ends the subscription on the spot and Stripe credits the unused remainder, rather than letting the paid period run out.\n\nUse this OR the request above, not both — the second one 404s, because the organization is already gone.",
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}?cancelImmediately=true",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}"
+              ],
+              "query": [
+                {
+                  "key": "cancelImmediately",
+                  "value": "true"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204', function () { pm.response.to.have.status(204); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Billing is unreachable afterwards (negative)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerAccessToken}}"
+              }
+            ],
+            "description": "**Expected to fail.** A deleted tenant is a 404 to everyone, including its owner — which is exactly why cancellation happens during the delete rather than being left for later.",
+            "url": {
+              "raw": "{{baseUrl}}/api/organizations/{{organizationId}}/licenses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organizations",
+                "{{organizationId}}",
+                "licenses"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', function () { pm.response.to.have.status(404); });"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "Deleting an organization also stops its subscription renewing — at period end by default, immediately with `?cancelImmediately=true`.\n\nClearing the `runId` collection variable is usually enough to start clean without deleting anything."
+    }
+  ]
+}

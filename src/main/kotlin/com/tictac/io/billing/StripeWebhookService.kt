@@ -5,6 +5,7 @@ import com.stripe.exception.EventDataObjectDeserializationException
 import com.stripe.model.Event
 import com.stripe.model.StripeObject
 import com.stripe.model.Subscription as StripeSubscription
+import com.tictac.io.organization.OrganizationRepository
 import org.slf4j.LoggerFactory
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
@@ -44,6 +45,7 @@ class StripeWebhookService(
     private val subscriptionRepository: SubscriptionRepository,
     private val billingCustomerRepository: BillingCustomerRepository,
     private val billingWebhookEventRepository: BillingWebhookEventRepository,
+    private val organizationRepository: OrganizationRepository,
     private val properties: BillingProperties,
 ) {
 
@@ -146,33 +148,42 @@ class StripeWebhookService(
         }
 
         // The first (and, in our model, only) line item carries everything that matters:
-        // the price the plan is read from, the seat quantity, and the period bounds. A
-        // subscription without one cannot be mapped to anything, so it fails rather than
-        // writing a row with a guessed plan and null dates.
+        // the price the billing interval is read from, the paid-licence quantity, and the
+        // period bounds. A subscription without one cannot be mapped to anything, so it fails
+        // rather than writing a row with a guessed interval and null dates.
         //
         // Additional items are ignored deliberately: TicTac sells one price per subscription,
-        // and quietly summing several would invent a seat count nobody agreed to.
+        // and quietly summing several would invent a licence count nobody agreed to.
         val item = stripeSubscription.items?.data?.firstOrNull()
             ?: throw UnmappableStripeStateException(
                 "Stripe subscription ${stripeSubscription.id} has no line items",
             )
 
         val priceId = item.price?.id
-        val plan = properties.planFor(priceId)
-            ?: throw UnmappableStripeStateException("No plan configured for Stripe price $priceId")
+        // The interval comes from the price, which is the only thing that knows it. An
+        // unconfigured price throws rather than defaulting: recording MONTHLY for an annual
+        // subscription would misstate what the customer bought, and by a factor of twelve.
+        val interval = properties.intervalFor(priceId)
+            ?: throw UnmappableStripeStateException("No billing interval configured for Stripe price $priceId")
+
+        val quantity = item.quantity?.toInt()
 
         val subscription = existing ?: Subscription(
             organizationId = organizationId,
-            plan = plan,
+            billingInterval = interval,
             status = SubscriptionStatus.fromStripe(stripeSubscription.status),
-            seatQuantity = item.quantity?.toInt() ?: 0,
+            paidLicenses = quantity ?: 0,
             provider = BillingProvider.STRIPE,
         )
 
-        subscription.plan = plan
+        subscription.billingInterval = interval
         subscription.status = SubscriptionStatus.fromStripe(stripeSubscription.status)
-        subscription.seatQuantity = item.quantity?.toInt() ?: subscription.seatQuantity
+        subscription.paidLicenses = quantity ?: subscription.paidLicenses
         subscription.providerSubscriptionId = stripeSubscription.id
+        // Quantity lives on the item, so changing the licence count later needs this id.
+        // Recorded here because the webhook is the only thing that knows it without asking
+        // Stripe.
+        subscription.providerItemId = item.id
         // Period bounds live on the subscription *item* in the current Stripe API, not on the
         // subscription - they moved, and reading them off the wrong object silently yields
         // nulls rather than an error.
@@ -186,7 +197,42 @@ class StripeWebhookService(
 
         subscriptionRepository.saveAndFlush(subscription)
 
+        // Stripe is authoritative about the quantity, so the organization's licence count
+        // follows it - which is what makes a quantity edited in the Stripe dashboard, or a
+        // checkout completing, arrive here rather than being invented locally.
+        syncLicenseCount(organizationId, subscription)
+
         return WebhookOutcome.Applied(organizationId)
+    }
+
+    /**
+     * Brings the organization's licence count up to what Stripe is billing for.
+     *
+     * `paid_licenses + 1`, because the first licence is included free. This is how a completed
+     * checkout turns into licences the organization actually holds - nothing local writes them
+     * at checkout time, because a prepared payment form is not a payment.
+     *
+     * **Raised only, never lowered.** A subscription ending - CANCELED, UNPAID - would
+     * otherwise silently strip an organization of licences its members are sitting in, and
+     * turning people out because a card expired is precisely what must not happen. What the
+     * organization *holds* is its own record and survives; what it is *billed* for is
+     * `paid_licenses`, and any gap between the two is visible in the licence API.
+     *
+     * A deliberate reduction goes through [OrganizationLicenseService.changeLicenseCount],
+     * which writes the local count itself and does not need this to lower anything.
+     */
+    private fun syncLicenseCount(organizationId: UUID, subscription: Subscription) {
+        if (!subscription.status.isBilling()) return
+
+        val licensesBilledFor = subscription.paidLicenses + OrganizationLicenses.INCLUDED_LICENSES
+        val organization = organizationRepository.findAndLockById(organizationId) ?: return
+
+        if (organization.licenseCount >= licensesBilledFor) return
+
+        organization.licenseCount = licensesBilledFor.toInt()
+        organizationRepository.saveAndFlush(organization)
+
+        log.info("Organization {} now holds {} licence(s), per Stripe", organizationId, licensesBilledFor)
     }
 
     /**

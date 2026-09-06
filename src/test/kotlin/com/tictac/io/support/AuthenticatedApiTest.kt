@@ -8,6 +8,7 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delet
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 import java.util.UUID
 
@@ -55,6 +56,12 @@ abstract class AuthenticatedApiTest : PostgresIntegrationTest() {
 
     protected fun postJson(path: String, body: String, accessToken: String? = null): ResultActions {
         val request = post(path).contentType(MediaType.APPLICATION_JSON).content(body)
+        accessToken?.let { request.header(HttpHeaders.AUTHORIZATION, "Bearer $it") }
+        return mockMvc.perform(request)
+    }
+
+    protected fun putJson(path: String, body: String, accessToken: String? = null): ResultActions {
+        val request = put(path).contentType(MediaType.APPLICATION_JSON).content(body)
         accessToken?.let { request.header(HttpHeaders.AUTHORIZATION, "Bearer $it") }
         return mockMvc.perform(request)
     }

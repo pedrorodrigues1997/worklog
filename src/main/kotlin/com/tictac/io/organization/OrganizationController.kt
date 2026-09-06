@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.ResponseStatus
 import org.springframework.web.bind.annotation.RestController
 import java.util.UUID
@@ -50,10 +51,19 @@ class OrganizationController(
         @Valid @RequestBody request: UpdateOrganizationRequest,
     ): OrganizationResponse = organizationService.rename(organizationId, request)
 
-    /** Soft delete, OWNER only. Nothing belonging to the organization is destroyed. */
+    /**
+     * Soft delete, OWNER only. Nothing belonging to the organization is destroyed.
+     *
+     * Any active Stripe subscription stops renewing. `?cancelImmediately=true` ends it on the
+     * spot instead, crediting the unused remainder - the default leaves the period the customer
+     * already paid for alone.
+     */
     @DeleteMapping("/{organizationId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    fun delete(@PathVariable organizationId: UUID) = organizationService.softDelete(organizationId)
+    fun delete(
+        @PathVariable organizationId: UUID,
+        @RequestParam(defaultValue = "false") cancelImmediately: Boolean,
+    ) = organizationService.softDelete(organizationId, cancelImmediately)
 
     /**
      * Hands the organization to another member, demoting the caller to ADMIN. OWNER only.

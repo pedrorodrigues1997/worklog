@@ -31,6 +31,14 @@ class OrganizationInvitationApiIntegrationTest : OrganizationApiTest() {
         organizationId = createOrganization(owner, "Acme")
         addMember(organizationId, admin, OrganizationRole.ADMIN)
         addMember(organizationId, member, OrganizationRole.MEMBER)
+
+        // Seats are bought before people fill them, so an organization with no room refuses
+        // to issue an invitation at all. This suite is about issuing them; capacity has its
+        // own tests in OrganizationLicenseLifecycleIntegrationTest.
+        // Generously, on purpose. Every outstanding invitation holds a licence, so a suite
+        // that issues ten of them would otherwise start acquiring licences part-way through -
+        // which is tested in OrganizationLicenseLifecycleIntegrationTest, not here.
+        subscribeOrganization(organizationId, licenses = 25)
     }
 
     private fun invitationsPath(organization: UUID = organizationId) =
@@ -97,6 +105,7 @@ class OrganizationInvitationApiIntegrationTest : OrganizationApiTest() {
     fun `the owner of one organization cannot invite into another`() {
         val otherOwner = newUser("other-owner@example.com")
         val otherOrganization = createOrganization(otherOwner, "Other Company")
+            .also { subscribeOrganization(it, licenses = 11) }
 
         invite("bob@example.com", owner, organization = otherOrganization)
             .andExpect(status().isNotFound)
@@ -181,6 +190,7 @@ class OrganizationInvitationApiIntegrationTest : OrganizationApiTest() {
     fun `the same address can be invited to two different organizations`() {
         val otherOwner = newUser("other-owner@example.com")
         val otherOrganization = createOrganization(otherOwner, "Other Company")
+            .also { subscribeOrganization(it, licenses = 11) }
 
         invite("bob@example.com", owner).andExpect(status().isCreated)
         invite("bob@example.com", otherOwner, organization = otherOrganization).andExpect(status().isCreated)

@@ -4,6 +4,7 @@ import com.tictac.io.organization.OrganizationRole
 import com.tictac.io.support.OrganizationApiTest
 import com.tictac.io.support.TestUser
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
@@ -13,13 +14,14 @@ import org.mockito.kotlin.never
 import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
+import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.test.context.bean.override.mockito.MockitoBean
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 import java.util.UUID
 
 /**
- * Checkout, the billing portal, and reading subscription state.
+ * Checkout, the billing portal, and reading the subscription.
  *
  * [StripeGateway] is replaced here - it is the one component that makes a network call, and
  * a test suite that needed a Stripe account to run would not be run. Everything on this side
@@ -48,6 +50,8 @@ class BillingApiIntegrationTest : OrganizationApiTest() {
         organizationId = createOrganization(owner, "Acme")
         addMember(organizationId, admin, OrganizationRole.ADMIN)
         addMember(organizationId, member, OrganizationRole.MEMBER)
+        // Three members seeded directly, so the organization holds three licences to match.
+        setLicenseCount(organizationId, 3)
 
         whenever(stripeGateway.createCustomer(any(), any())).thenReturn("cus_test_new")
         whenever(stripeGateway.createCheckoutSession(any(), any(), any(), any()))
@@ -65,24 +69,38 @@ class BillingApiIntegrationTest : OrganizationApiTest() {
     private fun subscriptionPath(organization: UUID = organizationId) =
         "/api/organizations/$organization/subscription"
 
-    private fun checkout(caller: TestUser, organization: UUID = organizationId, body: String = """{"plan":"PRO"}""") =
-        postJson(checkoutPath(organization), body, caller.accessToken)
+    /** The default buys the three licences this three-person organization already occupies. */
+    private fun checkout(
+        caller: TestUser,
+        organization: UUID = organizationId,
+        body: String = """{"licenses":3,"interval":"MONTHLY"}""",
+    ) = postJson(checkoutPath(organization), body, caller.accessToken)
 
-    // --- who may change billing -------------------------------------------------------------
+    // --- who may buy licences ---------------------------------------------------------------
 
     @Test
-    fun `an owner can start checkout`() {
-        checkout(owner)
+    fun `an owner can check out for the licences they ask for`() {
+        checkout(owner, body = """{"licenses":10,"interval":"MONTHLY"}""")
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.sessionId").value("cs_test_1"))
             .andExpect(jsonPath("$.url").value("https://checkout.stripe.test/cs_test_1"))
+            .andExpect(jsonPath("$.licenseCount").value(10))
+            // One fewer, because the first licence is included free.
+            .andExpect(jsonPath("$.paidLicenses").value(9))
+            .andExpect(jsonPath("$.interval").value("MONTHLY"))
+
+        verify(stripeGateway).createCheckoutSession(any(), any(), eq(organizationId), eq(9L))
     }
 
     @Test
-    fun `an admin cannot start checkout, and neither can a member`() {
-        // Billing authority is narrower than administrative authority: an ADMIN runs the
-        // company's work, an OWNER commits it to spending money.
-        checkout(admin).andExpect(status().isForbidden)
+    fun `an admin can check out, because inviting already acquires licences`() {
+        checkout(admin).andExpect(status().isOk)
+
+        verify(stripeGateway).createCheckoutSession(any(), any(), eq(organizationId), eq(2L))
+    }
+
+    @Test
+    fun `a plain member cannot check out`() {
         checkout(member).andExpect(status().isForbidden)
 
         verify(stripeGateway, never()).createCheckoutSession(any(), any(), any(), any())
@@ -90,14 +108,14 @@ class BillingApiIntegrationTest : OrganizationApiTest() {
     }
 
     @Test
-    fun `an unauthenticated request cannot start checkout`() {
-        postJson(checkoutPath(), """{"plan":"PRO"}""").andExpect(status().isUnauthorized)
+    fun `an unauthenticated request cannot check out`() {
+        postJson(checkoutPath(), """{"licenses":3,"interval":"MONTHLY"}""").andExpect(status().isUnauthorized)
 
         verify(stripeGateway, never()).createCustomer(any(), any())
     }
 
     @Test
-    fun `a non-member cannot start checkout, and is not told the organization exists`() {
+    fun `a non-member cannot check out, and is not told the organization exists`() {
         checkout(newUser("outsider@example.com")).andExpect(status().isNotFound)
 
         verify(stripeGateway, never()).createCustomer(any(), any())
@@ -109,9 +127,58 @@ class BillingApiIntegrationTest : OrganizationApiTest() {
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.url").value("https://portal.stripe.test/bps_test_1"))
 
+        // Cards, invoices and cancellation are the payment instrument itself, not the
+        // headcount - so this stays narrower than licence management.
         postJson(portalPath(), "", admin.accessToken).andExpect(status().isForbidden)
         postJson(portalPath(), "", member.accessToken).andExpect(status().isForbidden)
         postJson(portalPath(), "").andExpect(status().isUnauthorized)
+    }
+
+    // --- monthly and annual --------------------------------------------------------------------
+
+    @Test
+    fun `an organization can buy monthly billing`() {
+        checkout(owner, body = """{"licenses":5,"interval":"MONTHLY"}""")
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.interval").value("MONTHLY"))
+
+        verify(stripeGateway).createCheckoutSession(any(), eq("price_test_monthly"), any(), eq(4L))
+    }
+
+    @Test
+    fun `an organization can buy annual billing`() {
+        checkout(owner, body = """{"licenses":5,"interval":"ANNUAL"}""")
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.interval").value("ANNUAL"))
+
+        // A different price, and that is the *only* difference - the quantity means the same
+        // thing either way.
+        verify(stripeGateway).createCheckoutSession(any(), eq("price_test_annual"), any(), eq(4L))
+    }
+
+    @Test
+    fun `changing licences on an annual subscription keeps it annual`() {
+        subscribeOrganization(organizationId, licenses = 5, interval = BillingInterval.ANNUAL)
+
+        putJson("/api/organizations/$organizationId/licenses", """{"licenses":8}""", owner.accessToken)
+            .andExpect(status().isOk)
+
+        // Only the quantity is sent. The price - and therefore the interval - is untouched,
+        // and Stripe prorates the remainder of the year itself.
+        verify(stripeGateway).updateSubscriptionQuantity(any(), any(), eq(7L))
+        verify(stripeGateway, never()).createCheckoutSession(any(), any(), any(), any())
+
+        getRequest(subscriptionPath(), owner.accessToken)
+            .andExpect(jsonPath("$.billingInterval").value("ANNUAL"))
+            .andExpect(jsonPath("$.billedLicenses").value(7))
+    }
+
+    @Test
+    fun `an unknown interval is rejected before anything reaches Stripe`() {
+        checkout(owner, body = """{"licenses":3,"interval":"WEEKLY"}""").andExpect(status().isBadRequest)
+        checkout(owner, body = """{"licenses":3}""").andExpect(status().isBadRequest)
+
+        verify(stripeGateway, never()).createCheckoutSession(any(), any(), any(), any())
     }
 
     // --- the Stripe customer -----------------------------------------------------------------
@@ -140,7 +207,8 @@ class BillingApiIntegrationTest : OrganizationApiTest() {
         whenever(stripeGateway.createCustomer(eq(otherOrganization), any())).thenReturn("cus_test_other")
 
         checkout(owner).andExpect(status().isOk)
-        checkout(otherOwner, organization = otherOrganization).andExpect(status().isOk)
+        checkout(otherOwner, organization = otherOrganization, body = """{"licenses":2,"interval":"MONTHLY"}""")
+            .andExpect(status().isOk)
 
         assertThat(billingCustomerRepository.count()).isEqualTo(2)
         assertThat(
@@ -152,50 +220,98 @@ class BillingApiIntegrationTest : OrganizationApiTest() {
     // --- what checkout does and does not do ----------------------------------------------------
 
     @Test
-    fun `checkout uses the configured price and the caller's own organization`() {
-        checkout(owner, body = """{"plan":"PRO","seatQuantity":7}""").andExpect(status().isOk)
+    fun `checkout uses the configured price, which the client cannot influence`() {
+        // The licence count and the interval are the customer's to choose; the price is not,
+        // and naming one in the body changes nothing because it is not a field here.
+        checkout(owner, body = """{"licenses":3,"interval":"MONTHLY","priceId":"price_free","amount":0}""")
+            .andExpect(status().isOk)
 
-        // The price comes from configuration, never from the request - a client that could
-        // name a price could name a cheaper one.
         verify(stripeGateway).createCheckoutSession(
             eq("cus_test_new"),
-            eq("price_test_pro"),
+            eq("price_test_monthly"),
             eq(organizationId),
-            eq(7L),
+            eq(2L),
         )
     }
 
     @Test
-    fun `creating a checkout session does not make the organization subscribed`() {
-        checkout(owner).andExpect(status().isOk)
-
-        // The whole point of the webhook. A prepared payment form is not a payment, and a
-        // client that never returns from Stripe must not leave anything activated here.
-        assertThat(subscriptionRepository.count()).isZero()
-        getRequest(subscriptionPath(), owner.accessToken)
-            .andExpect(status().isOk)
-            .andExpect(jsonPath("$.plan").value("FREE"))
-            .andExpect(jsonPath("$.seatQuantity").value(0))
-    }
-
-    @Test
-    fun `a plan with no configured price cannot be checked out`() {
-        checkout(owner, body = """{"plan":"FREE"}""")
-            .andExpect(status().isUnprocessableEntity)
-            .andExpect(jsonPath("$.title").value("Plan is not purchasable"))
+    fun `checkout cannot buy fewer licences than the organization's members occupy`() {
+        // Three members occupy three licences. Buying two would put the organization over
+        // capacity the moment it started paying.
+        checkout(owner, body = """{"licenses":2,"interval":"MONTHLY"}""")
+            .andExpect(status().isConflict)
+            .andExpect(jsonPath("$.title").value("Licences are occupied"))
+            .andExpect(jsonPath("$.minimumLicenses").value(3))
 
         verify(stripeGateway, never()).createCheckoutSession(any(), any(), any(), any())
     }
 
     @Test
-    fun `checkout validates its request`() {
+    fun `checkout must buy at least a second licence, since the first is free`() {
+        val soloOwner = newUser("solo@example.com")
+        val solo = createOrganization(soloOwner, "Solo")
+
+        // A one-licence organization is already free; there is nothing to check out for. And
+        // giving licences up is a licence change, not a checkout.
+        postJson(
+            "/api/organizations/$solo/billing/checkout",
+            """{"licenses":1,"interval":"MONTHLY"}""",
+            soloOwner.accessToken,
+        ).andExpect(status().isBadRequest)
+
+        verify(stripeGateway, never()).createCheckoutSession(any(), any(), any(), any())
+    }
+
+    @Test
+    fun `an organization that already has a subscription cannot check out again`() {
+        subscribeOrganization(organizationId, licenses = 3)
+
+        checkout(owner)
+            .andExpect(status().isConflict)
+            .andExpect(jsonPath("$.title").value("Already subscribed"))
+
+        // The whole point of the model: one subscription, its quantity changed - never a second.
+        verify(stripeGateway, never()).createCheckoutSession(any(), any(), any(), any())
+        assertThat(subscriptionRepository.count()).isEqualTo(1)
+    }
+
+    @Test
+    fun `a cancelled organization can check out again`() {
+        subscribeOrganization(organizationId, licenses = 3, status = SubscriptionStatus.CANCELED)
+
+        // A cancelled subscription cannot have licences added to it - there is nothing live -
+        // so checkout is the way back, and it is not refused as a duplicate.
+        checkout(owner).andExpect(status().isOk)
+    }
+
+    @Test
+    fun `creating a checkout session grants no licences`() {
+        checkout(owner, body = """{"licenses":9,"interval":"MONTHLY"}""").andExpect(status().isOk)
+
+        // The whole point of the webhook. A prepared payment form is not a payment, and a
+        // client that never returns from Stripe must not come away holding nine licences.
+        assertThat(subscriptionRepository.count()).isZero()
+        assertThat(licenseCountOf(organizationId)).isEqualTo(3)
+        getRequest(subscriptionPath(), owner.accessToken)
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.billedLicenses").value(0))
+            .andExpect(jsonPath("$.billing").value(false))
+    }
+
+    @Test
+    fun `the licence count and interval are required and bounded`() {
+        // 400 rather than 422: a missing or malformed field is a broken request, not a domain
+        // decision the organization is not allowed to make.
         listOf(
+            "",
             """{}""",
-            """{"plan":null}""",
-            """{"plan":"NOT_A_PLAN"}""",
-            """{"plan":"PRO","seatQuantity":0}""",
-            """{"plan":"PRO","seatQuantity":100000}""",
-        ).forEach { checkout(owner, body = it).andExpect(status().isBadRequest) }
+            """{"licenses":null,"interval":"MONTHLY"}""",
+            """{"licenses":-1,"interval":"MONTHLY"}""",
+            """{"licenses":100000,"interval":"MONTHLY"}""",
+            """{"licenses":5,"interval":null}""",
+        ).forEach { body ->
+            postJson(checkoutPath(), body, owner.accessToken).andExpect(status().isBadRequest)
+        }
 
         verify(stripeGateway, never()).createCheckoutSession(any(), any(), any(), any())
     }
@@ -216,29 +332,46 @@ class BillingApiIntegrationTest : OrganizationApiTest() {
     // --- reading the subscription ----------------------------------------------------------------
 
     @Test
-    fun `an organization that has never subscribed reads as FREE rather than 404`() {
+    fun `an organization that has never subscribed reads as unsubscribed rather than 404`() {
         getRequest(subscriptionPath(), owner.accessToken)
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.organizationId").value(organizationId.toString()))
-            .andExpect(jsonPath("$.plan").value("FREE"))
-            .andExpect(jsonPath("$.active").value(true))
+            .andExpect(jsonPath("$.status").doesNotExist())
+            .andExpect(jsonPath("$.billing").value(false))
+            .andExpect(jsonPath("$.billingInterval").doesNotExist())
+            .andExpect(jsonPath("$.billedLicenses").value(0))
             .andExpect(jsonPath("$.cancelAtPeriodEnd").value(false))
+            // It still holds licences, whether or not Stripe has ever heard of it.
+            .andExpect(jsonPath("$.licenseCount").value(3))
     }
 
     @Test
     fun `every member can read the subscription`() {
-        subscriptionRepository.saveAndFlush(
-            Subscription(organizationId, SubscriptionPlan.PRO, SubscriptionStatus.ACTIVE, 5, BillingProvider.STRIPE),
-        )
+        subscribeOrganization(organizationId, licenses = 6)
 
         listOf(owner, admin, member).forEach { user ->
             getRequest(subscriptionPath(), user.accessToken)
                 .andExpect(status().isOk)
-                .andExpect(jsonPath("$.plan").value("PRO"))
                 .andExpect(jsonPath("$.status").value("ACTIVE"))
-                .andExpect(jsonPath("$.active").value(true))
-                .andExpect(jsonPath("$.seatQuantity").value(5))
+                .andExpect(jsonPath("$.billing").value(true))
+                .andExpect(jsonPath("$.billingInterval").value("MONTHLY"))
+                .andExpect(jsonPath("$.billedLicenses").value(5))
+                .andExpect(jsonPath("$.licenseCount").value(6))
         }
+    }
+
+    @Test
+    fun `the subscription response has no plan, because there are no tiers`() {
+        subscribeOrganization(organizationId, licenses = 4)
+
+        val body = getRequest(subscriptionPath(), member.accessToken)
+            .andExpect(status().isOk)
+            .andReturn().response.contentAsString
+
+        // Every organization has every feature; a plan field would imply otherwise.
+        assertThat(body).doesNotContain("\"plan\"")
+        assertThat(body).doesNotContain("PRO")
+        assertThat(body).doesNotContain("FREE")
     }
 
     @Test
@@ -247,7 +380,7 @@ class BillingApiIntegrationTest : OrganizationApiTest() {
             BillingCustomer(organizationId, BillingProvider.STRIPE, "cus_secret_identifier"),
         )
         subscriptionRepository.saveAndFlush(
-            Subscription(organizationId, SubscriptionPlan.PRO, SubscriptionStatus.ACTIVE, 5, BillingProvider.STRIPE)
+            Subscription(organizationId, BillingInterval.MONTHLY, SubscriptionStatus.ACTIVE, 5, BillingProvider.STRIPE)
                 .apply { providerSubscriptionId = "sub_secret_identifier" },
         )
 
@@ -259,20 +392,12 @@ class BillingApiIntegrationTest : OrganizationApiTest() {
         assertThat(body).doesNotContain("sub_secret_identifier")
         assertThat(body).doesNotContain("sk_test")
         assertThat(body).doesNotContain("whsec")
-        assertThat(body).doesNotContain("price_test_pro")
+        assertThat(body).doesNotContain("price_test")
     }
 
     @Test
-    fun `seat quantity is what was purchased, not the member count`() {
-        // Three members, five seats. Allowed at the data-model level: seat enforcement is a
-        // separate decision and inventing it here would be a pricing rule set by a default.
-        subscriptionRepository.saveAndFlush(
-            Subscription(organizationId, SubscriptionPlan.PRO, SubscriptionStatus.ACTIVE, 5, BillingProvider.STRIPE),
-        )
-
-        assertThat(organizationMemberRepository.count()).isEqualTo(3)
-        getRequest(subscriptionPath(), owner.accessToken)
-            .andExpect(jsonPath("$.seatQuantity").value(5))
+    fun `reading a subscription requires authentication`() {
+        getRequest(subscriptionPath()).andExpect(status().isUnauthorized)
     }
 
     // --- tenant isolation ---------------------------------------------------------------------------
@@ -283,7 +408,7 @@ class BillingApiIntegrationTest : OrganizationApiTest() {
         val otherOrganization = createOrganization(otherOwner, "Other Company")
         subscriptionRepository.saveAndFlush(
             Subscription(
-                otherOrganization, SubscriptionPlan.PRO, SubscriptionStatus.ACTIVE, 42, BillingProvider.STRIPE,
+                otherOrganization, BillingInterval.MONTHLY, SubscriptionStatus.ACTIVE, 42, BillingProvider.STRIPE,
             ),
         )
 
@@ -293,7 +418,10 @@ class BillingApiIntegrationTest : OrganizationApiTest() {
         val body = getRequest(subscriptionPath(otherOrganization), owner.accessToken)
             .andExpect(status().isNotFound)
             .andReturn().response.contentAsString
-        assertThat(body).doesNotContain("42")
+        // By field, not by value: the organization id is in the problem detail, and a random
+        // UUID containing the digits of a quantity would make a substring check flaky.
+        assertThat(body).doesNotContain("billedLicenses")
+        assertThat(body).doesNotContain("licenseCount")
 
         verify(stripeGateway, never()).createCustomer(any(), any())
     }
@@ -303,42 +431,31 @@ class BillingApiIntegrationTest : OrganizationApiTest() {
         val otherOwner = newUser("other-owner@example.com")
         val otherOrganization = createOrganization(otherOwner, "Other Company")
 
-        subscriptionRepository.saveAndFlush(
-            Subscription(organizationId, SubscriptionPlan.PRO, SubscriptionStatus.ACTIVE, 5, BillingProvider.STRIPE),
-        )
-        subscriptionRepository.saveAndFlush(
-            Subscription(
-                otherOrganization, SubscriptionPlan.FREE, SubscriptionStatus.CANCELED, 99, BillingProvider.STRIPE,
-            ),
-        )
+        subscribeOrganization(organizationId, licenses = 6)
+        subscribeOrganization(otherOrganization, licenses = 100, interval = BillingInterval.ANNUAL)
 
         getRequest(subscriptionPath(), owner.accessToken)
-            .andExpect(jsonPath("$.seatQuantity").value(5))
-            .andExpect(jsonPath("$.plan").value("PRO"))
+            .andExpect(jsonPath("$.billedLicenses").value(5))
+            .andExpect(jsonPath("$.billingInterval").value("MONTHLY"))
         getRequest(subscriptionPath(otherOrganization), otherOwner.accessToken)
-            .andExpect(jsonPath("$.seatQuantity").value(99))
-            .andExpect(jsonPath("$.plan").value("FREE"))
-    }
-
-    @Test
-    fun `reading a subscription requires authentication`() {
-        getRequest(subscriptionPath()).andExpect(status().isUnauthorized)
+            .andExpect(jsonPath("$.billedLicenses").value(99))
+            .andExpect(jsonPath("$.billingInterval").value("ANNUAL"))
     }
 
     @Test
     fun `the database refuses a second subscription for one organization`() {
         subscriptionRepository.saveAndFlush(
-            Subscription(organizationId, SubscriptionPlan.PRO, SubscriptionStatus.ACTIVE, 5, BillingProvider.STRIPE),
+            Subscription(organizationId, BillingInterval.MONTHLY, SubscriptionStatus.ACTIVE, 5, BillingProvider.STRIPE),
         )
 
         // The final guarantee behind every webhook path: one subscription per organization,
         // whatever the application does.
-        org.assertj.core.api.Assertions.assertThatThrownBy {
+        assertThatThrownBy {
             subscriptionRepository.saveAndFlush(
                 Subscription(
-                    organizationId, SubscriptionPlan.PRO, SubscriptionStatus.ACTIVE, 9, BillingProvider.STRIPE,
+                    organizationId, BillingInterval.ANNUAL, SubscriptionStatus.ACTIVE, 9, BillingProvider.STRIPE,
                 ),
             )
-        }.isInstanceOf(org.springframework.dao.DataIntegrityViolationException::class.java)
+        }.isInstanceOf(DataIntegrityViolationException::class.java)
     }
 }

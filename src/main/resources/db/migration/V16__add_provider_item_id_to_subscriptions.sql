@@ -1,0 +1,15 @@
+-- The Stripe subscription *item* behind the subscription.
+--
+-- Needed because Stripe's quantity lives on the item, not on the subscription:
+-- `SubscriptionUpdateParams` has no `setQuantity`, only `addItem(Item.setId(..).setQuantity(..))`.
+-- Without the item id, every seat change would have to fetch the subscription from Stripe
+-- first just to learn it - a network round trip inside the transaction that holds the
+-- organization's membership lock.
+--
+-- Written from the same webhook that writes everything else here, so it stays a cache of
+-- Stripe's state rather than something this application decides.
+--
+-- Nullable: a subscription row can exist before a webhook has described its items, and the
+-- seat-synchronisation path treats a missing item id as "not ready to resize yet" rather
+-- than guessing.
+ALTER TABLE subscriptions ADD COLUMN provider_item_id VARCHAR(255);

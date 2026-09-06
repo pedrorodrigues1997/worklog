@@ -49,6 +49,9 @@ class InvitationConcurrencyIntegrationTest : OrganizationApiTest() {
         owner = newUser("owner@example.com")
         bob = newUser("bob@example.com")
         organizationId = createOrganization(owner, "Acme")
+        // Seats bought up front: inviting is refused without a free seat, and this suite is
+        // about the invitation's own concurrency rather than about capacity.
+        subscribeOrganization(organizationId, licenses = 6)
     }
 
     @Test

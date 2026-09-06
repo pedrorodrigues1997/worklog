@@ -110,5 +110,23 @@ interface OrganizationInvitationRepository : JpaRepository<OrganizationInvitatio
         email: String,
     ): OrganizationInvitation?
 
+    /**
+     * Invitations still outstanding: un-accepted and not yet expired.
+     *
+     * Each one is **holding a licence**. A licence is acquired when an invitation is issued,
+     * so counting only members would let two invitations issued back to back both be told the
+     * same single vacant licence is theirs, and the organization would end up with more people
+     * in it than it holds licences for.
+     *
+     * Expiry is passed in rather than read here so the caller's clock decides, and so the
+     * count agrees with [OrganizationInvitation.isPendingAt] rather than being a second,
+     * subtly different definition of "pending". A lapsed invitation releases its licence,
+     * which becomes vacant and reusable.
+     */
+    fun countByOrganizationIdAndAcceptedAtIsNullAndExpiresAtAfter(
+        organizationId: UUID,
+        now: Instant,
+    ): Long
+
     fun findAllByOrganizationIdAndEmail(organizationId: UUID, email: String): List<OrganizationInvitation>
 }

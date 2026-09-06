@@ -19,6 +19,21 @@ interface OrganizationMemberRepository : JpaRepository<OrganizationMember, UUID>
     fun countByOrganizationIdAndRole(organizationId: UUID, role: OrganizationRole): Long
 
     /**
+     * The canonical member count, and the basis of every billing decision.
+     *
+     * Every row, whatever the role - the owner is a person and is counted like anyone else.
+     * There is deliberately no second count stored anywhere: a cached `member_count` column
+     * would be one more thing to drift from the memberships it claims to describe, and this
+     * table is the membership model.
+     *
+     * Note that this counts rows, so a member whose *account* has since been closed still
+     * occupies a seat. That is intentional - the seat is allocated until an administrator
+     * removes the membership - but it does mean the count can exceed what
+     * [findMembersOfOrganization] lists. See the note in OrganizationLicenseService.
+     */
+    fun countByOrganizationId(organizationId: UUID): Long
+
+    /**
      * The organization's owner, with the row locked for update (`SELECT ... FOR UPDATE`).
      *
      * This is the serialisation point for ownership transfer. Two concurrent transfers of

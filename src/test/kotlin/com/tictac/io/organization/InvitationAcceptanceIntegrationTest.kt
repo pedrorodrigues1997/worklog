@@ -31,6 +31,11 @@ class InvitationAcceptanceIntegrationTest : OrganizationApiTest() {
     fun createOrganization() {
         owner = newUser("owner@example.com")
         organizationId = createOrganization(owner, "Acme")
+
+        // One member so far, so the person about to join is the second - the first that
+        // costs anything. Seeded with exactly that one seat, which is what makes acceptance
+        // possible at all now and needs no Stripe call to apply.
+        subscribeOrganization(organizationId, licenses = 2)
     }
 
     private fun acceptAsExistingUser(token: String, user: TestUser) =
@@ -328,7 +333,10 @@ class InvitationAcceptanceIntegrationTest : OrganizationApiTest() {
     fun `an invitation into a closed organization is refused`() {
         val bob = newUser("bob@example.com")
         val token = inviteToOrganization(organizationId, "bob@example.com", owner)
-        deleteRequest("/api/organizations/$organizationId", owner.accessToken).andExpect(status().isNoContent)
+        // Closed directly rather than through DELETE: deleting also cancels the subscription,
+        // which would drag a Stripe stand-in into a suite that is about invitations. The
+        // tombstone is the only part of it this test cares about.
+        closeOrganization(organizationId)
 
         // Joining a soft-deleted organization would create a membership OrganizationAccess
         // refuses to honour - a dead end the invitee could not diagnose.
