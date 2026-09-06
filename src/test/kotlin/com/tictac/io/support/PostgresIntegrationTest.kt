@@ -5,6 +5,8 @@ import com.tictac.io.authentication.oauth.UserIdentityRepository
 import com.tictac.io.authentication.token.RefreshTokenRepository
 import com.tictac.io.organization.OrganizationMemberRepository
 import com.tictac.io.organization.OrganizationRepository
+import com.tictac.io.project.ProjectMemberRepository
+import com.tictac.io.project.ProjectRepository
 import com.tictac.io.user.UserRepository
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
@@ -46,12 +48,20 @@ abstract class PostgresIntegrationTest {
     @Autowired
     protected lateinit var organizationMemberRepository: OrganizationMemberRepository
 
+    @Autowired
+    protected lateinit var projectRepository: ProjectRepository
+
+    @Autowired
+    protected lateinit var projectMemberRepository: ProjectMemberRepository
+
     /** Tests commit, so state has to be cleared explicitly between them. Children first. */
     @BeforeEach
     fun clearDatabase() {
         oAuthLoginCodeRepository.deleteAll()
         userIdentityRepository.deleteAll()
         refreshTokenRepository.deleteAll()
+        projectMemberRepository.deleteAll()
+        projectRepository.deleteAll()
         organizationMemberRepository.deleteAll()
         organizationRepository.deleteAll()
         userRepository.deleteAll()

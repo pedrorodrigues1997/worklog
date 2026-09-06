@@ -10,6 +10,9 @@ import com.tictac.io.organization.InvalidOwnershipTransferException
 import com.tictac.io.organization.OrganizationMemberNotFoundException
 import com.tictac.io.organization.OrganizationNotFoundException
 import com.tictac.io.organization.OwnershipTransferConflictException
+import com.tictac.io.project.ProjectAssignmentConflictException
+import com.tictac.io.project.ProjectMemberNotFoundException
+import com.tictac.io.project.ProjectNotFoundException
 import com.tictac.io.user.AccountClosureBlockedException
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpHeaders
@@ -118,6 +121,31 @@ class ApiExceptionHandler : ResponseEntityExceptionHandler() {
     fun handleOrganizationMemberNotFound(ex: OrganizationMemberNotFoundException): ProblemDetail =
         ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.message).apply {
             title = "Member not found"
+        }
+
+    /**
+     * The project does not exist, belongs to another organization, or is invisible to this
+     * caller. One answer for all three: an organization MEMBER who is not assigned has no
+     * legitimate way to learn a project exists, so a 403 here would leak its existence.
+     */
+    @ExceptionHandler(ProjectNotFoundException::class)
+    fun handleProjectNotFound(ex: ProjectNotFoundException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.message).apply {
+            title = "Project not found"
+        }
+
+    /** The caller can already see the project, so naming a missing assignment leaks nothing. */
+    @ExceptionHandler(ProjectMemberNotFoundException::class)
+    fun handleProjectMemberNotFound(ex: ProjectMemberNotFoundException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.message).apply {
+            title = "Project member not found"
+        }
+
+    /** Already assigned, or the target's account is closed. */
+    @ExceptionHandler(ProjectAssignmentConflictException::class)
+    fun handleProjectAssignmentConflict(ex: ProjectAssignmentConflictException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "Cannot assign this user"
         }
 
     /**

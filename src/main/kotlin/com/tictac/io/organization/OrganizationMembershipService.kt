@@ -1,5 +1,6 @@
 package com.tictac.io.organization
 
+import com.tictac.io.project.ProjectMemberRepository
 import com.tictac.io.user.UserRepository
 import org.springframework.security.access.AccessDeniedException
 import org.springframework.stereotype.Service
@@ -21,6 +22,7 @@ class OrganizationMembershipService(
     private val organizationAccess: OrganizationAccess,
     private val organizationMemberRepository: OrganizationMemberRepository,
     private val userRepository: UserRepository,
+    private val projectMemberRepository: ProjectMemberRepository,
 ) {
 
     /** Any member may see who else is in the organization. */
@@ -88,8 +90,19 @@ class OrganizationMembershipService(
      * OWNER, so the owner cannot be removed by an admin and cannot remove themselves. The
      * organization therefore always has exactly one owner for as long as it exists.
      *
-     * Only the membership row goes. The user account is untouched - they may well be a
-     * member of other organizations - and so is anything they created here.
+     * Their project assignments in this organization go with them, in this same
+     * transaction. A project member who is no longer an organization member is a state the
+     * domain does not allow - it would leave someone assigned to work inside a company they
+     * have left - and it cannot be prevented by a foreign key, because `project_members`
+     * reaches the organization only through `projects.organization_id`. So it is done here,
+     * atomically: either they leave the organization and every project in it, or neither.
+     *
+     * Scoped to this organization. Assignments in a *different* organization they still
+     * belong to are none of this operation's business.
+     *
+     * Beyond that, only the membership row goes. The user account is untouched - they may
+     * well be a member of other organizations - and so is anything they created here,
+     * including the projects themselves.
      *
      * A member leaving of their own accord is a different operation with different rules
      * (the owner still could not use it) and is not implemented.
@@ -105,6 +118,7 @@ class OrganizationMembershipService(
             )
         }
 
+        projectMemberRepository.deleteAllForUserInOrganization(context.organizationId, targetUserId)
         organizationMemberRepository.delete(target)
     }
 

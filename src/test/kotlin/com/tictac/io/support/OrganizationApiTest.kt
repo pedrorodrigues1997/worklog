@@ -50,4 +50,41 @@ abstract class OrganizationApiTest : AuthenticatedApiTest() {
 
     protected fun roleOf(organizationId: UUID, user: TestUser): OrganizationRole? =
         organizationMemberRepository.findByOrganizationIdAndUserId(organizationId, user.id)?.role
+
+    /** Creates a project through the real endpoint. [creator] must be an OWNER or ADMIN. */
+    protected fun createProject(
+        organizationId: UUID,
+        creator: TestUser,
+        name: String = "Website Redesign",
+        description: String? = null,
+    ): UUID {
+        val body = if (description == null) {
+            """{"name":"$name"}"""
+        } else {
+            """{"name":"$name","description":"$description"}"""
+        }
+
+        val response = postJson("/api/organizations/$organizationId/projects", body, creator.accessToken)
+            .andExpect(status().isCreated)
+            .andReturn().response.contentAsString
+
+        return UUID.fromString(JsonPath.read(response, "$.id"))
+    }
+
+    /** Assigns [user] to a project through the real endpoint. [caller] must be OWNER or ADMIN. */
+    protected fun assignToProject(
+        organizationId: UUID,
+        projectId: UUID,
+        user: TestUser,
+        caller: TestUser,
+    ) {
+        postJson(
+            "/api/organizations/$organizationId/projects/$projectId/members",
+            """{"userId":"${user.id}"}""",
+            caller.accessToken,
+        ).andExpect(status().isCreated)
+    }
+
+    protected fun isAssigned(projectId: UUID, user: TestUser): Boolean =
+        projectMemberRepository.findByProjectIdAndUserId(projectId, user.id) != null
 }

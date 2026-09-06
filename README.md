@@ -632,6 +632,149 @@ matters when seats are billed, where the fix is to count through `users.deleted_
 The invariant all of this protects: **an active organization is never owned by a closed
 account.**
 
+## Projects
+
+A project belongs to exactly one organization, and organization membership grants nothing
+inside it. Those are two different questions, and keeping them apart is what lets a company
+have work that not everybody is on:
+
+```
+organization membership  →  does this person belong to the company?
+project membership       →  is this person assigned to this piece of work?
+```
+
+```
+Acme
+├── Pedro   OWNER      ├── Website Redesign  →  Pedro, Alice
+├── Alice   ADMIN      └── Mobile App        →  Pedro, Bob, Sarah
+├── Bob     MEMBER
+└── Sarah   MEMBER          Alice ∈ Acme, but Alice ∉ Mobile App
+```
+
+Every endpoint is nested under its organization, so the tenant is in the path and is checked
+on every call. All require a valid access token.
+
+| Method   | Path | Who may call it |
+| -------- | ---- | --------------- |
+| `POST`   | `/api/organizations/{orgId}/projects` | `OWNER`, `ADMIN` |
+| `GET`    | `/api/organizations/{orgId}/projects` | any member (scoped, below) |
+| `GET`    | `/api/organizations/{orgId}/projects/{projectId}` | admins, or assigned member |
+| `PATCH`  | `/api/organizations/{orgId}/projects/{projectId}` | `OWNER`, `ADMIN` |
+| `GET`    | `/api/organizations/{orgId}/projects/{projectId}/members` | admins, or assigned member |
+| `POST`   | `/api/organizations/{orgId}/projects/{projectId}/members` | `OWNER`, `ADMIN` |
+| `DELETE` | `/api/organizations/{orgId}/projects/{projectId}/members/{userId}` | `OWNER`, `ADMIN` |
+
+### Example
+
+```bash
+# Create. The organization comes from the URL - there is no body field that could
+# point the project at a different one.
+curl -X POST http://localhost:8080/api/organizations/$ORG_ID/projects \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"Website Redesign","description":"Redesign the company website"}'
+# {"id":"...","name":"Website Redesign","description":"...","isActive":true,
+#  "createdAt":"...","updatedAt":"..."}
+
+# Assign an organization member to it.
+curl -X POST http://localhost:8080/api/organizations/$ORG_ID/projects/$PROJECT_ID/members \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"userId":"..."}'
+
+# Archive it. There is no DELETE - see below.
+curl -X PATCH http://localhost:8080/api/organizations/$ORG_ID/projects/$PROJECT_ID \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"isActive":false}'
+```
+
+### Listing is scoped to the caller
+
+`GET .../projects` returns two different lists behind one URL, deliberately:
+
+- **OWNER / ADMIN** — every project in the organization.
+- **MEMBER** — only the projects they are assigned to. A member with no assignments gets an
+  empty list, even though the organization has projects.
+
+That is what makes this endpoint usable directly as the frontend's project selector. The
+optional `active` query parameter narrows it: `active=true` gives the projects that are
+selectable for new work, which is the query time tracking will be built on, `active=false`
+gives the archive, and omitting it gives both.
+
+### Authorization
+
+The full chain, evaluated in this order on every project-scoped call:
+
+```
+access token → organization membership → organization role → project in that organization
+             → project assignment → permission
+```
+
+The first two links are `OrganizationAccess`, unchanged and not reimplemented. `ProjectAccess`
+adds the last two, and every project service method starts there:
+
+```kotlin
+// anyone who can see the project - an organization admin, or an assigned member
+val context = projectAccess.require(organizationId, projectId)
+
+// administrative operations name the roles that may proceed
+val context = projectAccess.require(organizationId, projectId, OrganizationRole.OWNER, OrganizationRole.ADMIN)
+```
+
+**Both ids are untrusted, and neither is ever used alone.** A project is looked up by
+`(project id, organization id)` together, so a project id borrowed from another tenant
+resolves to nothing however valid it is. Resolving by id and comparing the organization
+afterwards would work too — but only until someone forgets the second step, and here there is
+no second step to forget.
+
+**Failures are shaped like the organization ones.** An organization MEMBER who is not assigned
+gets `404`, identical to a project that does not exist: they have no legitimate way to learn
+that a project exists, so a `403` would leak it. An assigned member who lacks the *role* gets
+`403` — they can already see the project, so saying so costs nothing. Visibility is checked
+before the role, so the second case can never expose the first.
+
+### Archiving, not deleting
+
+There is no `DELETE` for a project. Time entries will point at projects, and an archived
+project still has to render every historical entry that references it, so `is_active` is the
+whole lifecycle: `PATCH {"isActive": false}` archives, `true` restores. Archiving is
+idempotent, keeps the project readable, and keeps its assignments.
+
+Project names are deliberately not unique within an organization — archiving "Website
+Redesign" and starting a new one next year under the same name is normal, and the two rows
+must be able to coexist.
+
+### Membership rules
+
+Assignment is always an explicit act by an `OWNER` or `ADMIN`. Nobody is added to a project
+just for being in the organization. Rejected: a user who is not an organization member, one
+from another organization, one that does not exist (all `404`, so the endpoint cannot be used
+to probe for account ids), a closed account and a duplicate assignment (both `409`).
+
+**Self-removal is not offered.** It was considered and declined: nothing in this codebase lets
+anyone leave anything on their own — an organization member cannot remove themselves from an
+organization, and neither can the owner — so making project assignment the sole exception
+would be inconsistent for no product need, and it would let someone quietly drop off work an
+administrator had assigned them. "Leave" is worth building once, properly, at both levels. An
+administrator removing *their own* assignment is allowed and is not a special case.
+
+### Leaving an organization
+
+Removing someone from an organization deletes their project assignments **in that
+organization**, in the same transaction:
+
+```
+Remove Alice from Acme → remove Alice from every Acme project → remove Alice from Acme
+```
+
+A project member who is no longer an organization member is a state the domain does not
+allow. It cannot be a foreign key — `project_members` reaches the organization only through
+`projects.organization_id`, one hop away — so it is enforced in the service, atomically.
+Assignments in a *different* organization Alice still belongs to are untouched.
+
+**Closing an account is deliberately different.** Removal breaks the invariant and so must
+cascade; closure does not — the person is still an organization member, their account is
+simply closed — so their assignment rows stay, inert, and are filtered out of every listing
+along with the closed accounts themselves.
+
 ## Layout
 
 Code is organised by business domain, not by technical layer:
@@ -643,6 +786,7 @@ com.tictac.io
 │   └── ratelimit/   throttling for the auth endpoints
 ├── user/            the user entity, ActiveUser, GET/DELETE /api/users/me
 ├── organization/    organizations, memberships, roles, tenant-scoped authorization
+├── project/         projects, assignments, project-scoped authorization
 └── authentication/  registration, login, refresh, logout, HTTP security
     ├── token/       JWT issuing/decoding, refresh-token state and cleanup
     └── oauth/       Google registration, identity linking, sign-in handoff

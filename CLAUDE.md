@@ -57,6 +57,10 @@ com.tictac.io
 │   ├── OrganizationAccess.kt       THE tenant-scoped authorisation gate
 │   ├── OrganizationOwnershipService.kt  the only operation that moves OWNER
 │   └── Organization*Service.kt     creation, settings, membership management
+├── project/
+│   ├── Project*.kt                 entity, repository, DTOs, controllers
+│   ├── ProjectAccess.kt            project-scoped gate, layered on OrganizationAccess
+│   └── Project*Service.kt          creation, settings, assignment
 └── authentication/
     ├── SecurityConfig.kt           two filter chains (public POSTs, default-deny)
     ├── PasswordEncoderConfig.kt
@@ -82,6 +86,8 @@ anything, and startup fails if a mapping and a migration have drifted apart.
 | `oauth_login_codes` | single-use codes handing an OAuth sign-in to the frontend |
 | `organizations` | `organization_id`, `organization_name`, `created_at`, `deleted_at` (soft delete) |
 | `organization_members` | `(organization_id, user_id)` unique, `role`; one OWNER per org via a partial unique index |
+| `projects` | `project_id`, `organization_id`, `project_name`, `description`, `is_active` (archive flag, not a soft delete), `created_at`, `updated_at` |
+| `project_members` | `(project_id, user_id)` unique - assignment of an organisation member to a project. No role, no organisation id |
 
 Designed but **not yet implemented**: `subscriptions`. The agreed DBML for it lives in the
 product brief; treat it as the source of truth and do not redesign it. The organization
@@ -197,6 +203,24 @@ them fail, the change is wrong, not the test.
     account closure refuses while the caller owns one, and ownership transfer refuses a
     closed target. The two interlock on a `SELECT ... FOR UPDATE` of the `users` row, so they
     cannot both read a stale answer and then both act on it.
+18. **A project is always resolved by `(project id, organisation id)` together**, via
+    `ProjectAccess`. Never `findById` on a project. A project id from another tenant is a
+    valid UUID that exists in the table; looking it up by both ids is what makes it
+    unreachable, with no second step anyone can forget.
+19. **Organisation membership grants nothing at project level.** An organisation MEMBER sees
+    and reaches only the projects they are assigned to; assignment is always an explicit act
+    by an OWNER or ADMIN. Administrators see every project without being assigned — being
+    able to administer a project is not the same as being on it.
+20. **Project visibility is checked before the role gate.** An unassigned MEMBER gets 404, an
+    assigned one lacking the role gets 403. Reversing the order would let the refusal confirm
+    a project exists to someone with no way to know it does.
+21. **Removing an organisation member deletes their project assignments in that organisation,
+    in the same transaction.** "A project member is also an organisation member" cannot be a
+    foreign key - `project_members` reaches the organisation only through
+    `projects.organization_id` - so it is enforced in `OrganizationMembershipService`.
+    Account *closure* deliberately does not cascade: it does not break the invariant.
+22. **Projects are archived, never deleted** (`is_active`). Time entries will point at them,
+    and an archived project still has to render every historical entry that references it.
 
 ### OAuth flow, in one picture
 
@@ -238,13 +262,13 @@ must be the `jdbc:postgresql://…` form.
 docker compose up -d                 # PostgreSQL 17 on :5432
 set -a; source .env; set +a
 ./mvnw spring-boot:run
-./mvnw clean verify                  # 255 tests; Docker must be running
+./mvnw clean verify                  # 340 tests; Docker must be running
 ```
 
 - **Real PostgreSQL via Testcontainers.** No in-memory substitute — it would not catch a
   mismatch between a migration and a mapping.
 - `PostgresIntegrationTest` is the base: `@SpringBootTest` + MockMvc + container, and a
-  `@BeforeEach` that clears all six tables children-first. `AuthenticatedApiTest` extends it
+  `@BeforeEach` that clears all eight tables children-first. `AuthenticatedApiTest` extends it
   with register/login helpers that go through the **real** endpoints and filter chain.
 - All base-derived tests share one Spring context (and one container). A test that overrides
   properties gets its own context and its own container — currently
@@ -307,13 +331,14 @@ Spring Boot 4 / Kotlin specifics, all discovered the hard way:
 
 Do not add these speculatively; each is its own task.
 
-Subscriptions · Stripe · seats and licensing · projects · clients · tasks · time entries ·
-reports · CSV export · email sending (Resend) · **CORS** · frontend code of any kind.
+Subscriptions · Stripe · seats and licensing · clients · tasks · time entries · reports ·
+CSV export · email sending (Resend) · **CORS** · frontend code of any kind.
 
 Organisations, memberships and organisation roles now exist (see the invariants in §5).
-Ownership transfer and account closure exist too (invariants 15-17). What is *not* built on
-top of them: invitations, leaving an organisation voluntarily, per-project membership, and
-any permission model finer than the three roles.
+Ownership transfer and account closure exist too (invariants 15-17), and so do projects and
+project assignment (invariants 18-22). What is *not* built on top of them: invitations,
+leaving an organisation or a project voluntarily, per-project roles, and any permission model
+finer than the three organisation roles.
 
 Known open items in what *is* built:
 
@@ -343,8 +368,17 @@ Known open items in what *is* built:
 - A soft-deleted organisation may be owned by a closed account. Deliberate: it is unreachable
   either way, and blocking closure on it would be a dead end since transfer refuses deleted
   organisations too. Revisit if organisation restore is ever built.
-- Organisation soft delete leaves everything else in place, including memberships. There is
-  no restore and no purge.
+- Organisation soft delete leaves everything else in place, including memberships and
+  projects. There is no restore and no purge.
+- Projects have no per-project roles. Everyone assigned to a project has the same standing in
+  it, and what they may *do* to it comes from their organisation role. Adding a project role
+  now would be a permission framework built ahead of any requirement for one.
+- The project listing filters `active` in memory, not in SQL. Fine at tens of projects per
+  organisation; move it into the query before that assumption stops holding.
+- An organisation ADMIN can archive a project they are not on, and nothing warns them it has
+  work recorded against it. Worth revisiting once time entries exist.
+- `project_members` has no `deleted_at`, matching `organization_members`. A closed account
+  keeps its assignments; they are inert and filtered out of every listing.
 - `logging` never contains passwords, hashes or tokens. Keep it that way.
 
 ---

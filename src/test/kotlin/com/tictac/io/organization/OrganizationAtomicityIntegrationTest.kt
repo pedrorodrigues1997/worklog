@@ -85,6 +85,30 @@ class OrganizationAtomicityIntegrationTest : OrganizationApiTest() {
     }
 
     @Test
+    fun `a failure removing the organization membership rolls back the project cleanup`() {
+        val owner = newUser("cascade-owner@example.com")
+        val alice = newUser("cascade-alice@example.com")
+        val organizationId = createOrganization(owner, "Acme")
+        organizationMemberRepository.saveAndFlush(
+            OrganizationMember(organizationId, alice.id, OrganizationRole.MEMBER),
+        )
+        val projectId = createProject(organizationId, owner, "Website Redesign")
+        assignToProject(organizationId, projectId, alice, owner)
+
+        // Removal deletes the project assignments first and the membership second. Fail the
+        // second, and the assignments must come back with it - otherwise Alice would still
+        // be an Acme member while silently dropped from every Acme project.
+        doThrow(DataIntegrityViolationException("membership delete failed"))
+            .whenever(memberRepositorySpy).delete(any<OrganizationMember>())
+
+        deleteRequest("/api/organizations/$organizationId/members/${alice.id}", owner.accessToken)
+            .andExpect(status().is5xxServerError)
+
+        assertThat(roleOf(organizationId, alice)).isEqualTo(OrganizationRole.MEMBER)
+        assertThat(isAssigned(projectId, alice)).isTrue()
+    }
+
+    @Test
     fun `creation still works once the membership write succeeds`() {
         // Guards against the spy above silently leaking into the rest of the class and
         // making the failure assertions vacuous.
