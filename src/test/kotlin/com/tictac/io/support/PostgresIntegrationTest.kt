@@ -4,6 +4,7 @@ import com.tictac.io.authentication.oauth.OAuthLoginCodeRepository
 import com.tictac.io.authentication.oauth.UserIdentityRepository
 import com.tictac.io.authentication.token.RefreshTokenRepository
 import com.tictac.io.organization.OrganizationMemberRepository
+import com.tictac.io.organization.OrganizationInvitationRepository
 import com.tictac.io.organization.OrganizationRepository
 import com.tictac.io.project.ProjectCategoryRepository
 import com.tictac.io.project.ProjectMemberRepository
@@ -51,6 +52,9 @@ abstract class PostgresIntegrationTest {
     protected lateinit var organizationMemberRepository: OrganizationMemberRepository
 
     @Autowired
+    protected lateinit var organizationInvitationRepository: OrganizationInvitationRepository
+
+    @Autowired
     protected lateinit var projectRepository: ProjectRepository
 
     @Autowired
@@ -72,6 +76,7 @@ abstract class PostgresIntegrationTest {
         projectCategoryRepository.deleteAll()
         projectMemberRepository.deleteAll()
         projectRepository.deleteAll()
+        organizationInvitationRepository.deleteAll()
         organizationMemberRepository.deleteAll()
         organizationRepository.deleteAll()
         userRepository.deleteAll()

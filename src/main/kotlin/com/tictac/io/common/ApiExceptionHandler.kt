@@ -7,6 +7,11 @@ import com.tictac.io.authentication.oauth.InvalidOAuthIdentityException
 import com.tictac.io.authentication.oauth.OAuthLinkingNotAllowedException
 import com.tictac.io.authentication.token.InvalidRefreshTokenException
 import com.tictac.io.organization.InvalidOwnershipTransferException
+import com.tictac.io.organization.AlreadyOrganizationMemberException
+import com.tictac.io.organization.InvitationAlreadyPendingException
+import com.tictac.io.organization.InvitationEmailMismatchException
+import com.tictac.io.organization.InvitationNoLongerValidException
+import com.tictac.io.organization.InvitationNotFoundException
 import com.tictac.io.organization.OrganizationMemberNotFoundException
 import com.tictac.io.organization.OrganizationNotFoundException
 import com.tictac.io.organization.OwnershipTransferConflictException
@@ -242,6 +247,58 @@ class ApiExceptionHandler : ResponseEntityExceptionHandler() {
     fun handleProjectCategoryValidation(ex: ProjectCategoryValidationException): ProblemDetail =
         ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_ENTITY, ex.message).apply {
             title = "Invalid project category"
+        }
+
+    /**
+     * The address already belongs to a member of the organization. Raised both when issuing
+     * an invitation and when consuming one, since a person can join in between.
+     */
+    @ExceptionHandler(AlreadyOrganizationMemberException::class)
+    fun handleAlreadyOrganizationMember(ex: AlreadyOrganizationMemberException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "Already a member"
+        }
+
+    /** A usable invitation to this address already exists; issuing a second is refused. */
+    @ExceptionHandler(InvitationAlreadyPendingException::class)
+    fun handleInvitationAlreadyPending(ex: InvitationAlreadyPendingException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "Invitation already pending"
+        }
+
+    /**
+     * No invitation matches the presented token - unknown, or never existed. Says nothing
+     * about which, and cannot be reached without presenting a 256-bit value.
+     */
+    @ExceptionHandler(InvitationNotFoundException::class)
+    fun handleInvitationNotFound(ex: InvitationNotFoundException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.message).apply {
+            title = "Invitation not found"
+        }
+
+    /**
+     * The invitation exists but is spent or lapsed. Distinguished from "not found" on
+     * purpose: only the invitee can reach this, and "expired, ask for a new one" is the one
+     * message that tells them what to do.
+     */
+    @ExceptionHandler(InvitationNoLongerValidException::class)
+    fun handleInvitationNoLongerValid(ex: InvitationNoLongerValidException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "Invitation is no longer valid"
+        }
+
+    /**
+     * The registration in the request names a different address than the invitation.
+     *
+     * 422 rather than 403: there is no authenticated principal on that endpoint to forbid,
+     * and the request is well-formed - it is the combination of values the domain refuses.
+     * The authenticated-user mismatch is a 403, because there the caller has an identity and
+     * it is the wrong one.
+     */
+    @ExceptionHandler(InvitationEmailMismatchException::class)
+    fun handleInvitationEmailMismatch(ex: InvitationEmailMismatchException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_ENTITY, ex.message).apply {
+            title = "Invitation email mismatch"
         }
 
     /**

@@ -3,7 +3,11 @@ package com.tictac.io.support
 import com.jayway.jsonpath.JsonPath
 import com.tictac.io.organization.OrganizationMember
 import com.tictac.io.organization.OrganizationRole
+import jakarta.persistence.EntityManager
+import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
+import org.springframework.transaction.support.TransactionTemplate
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 
@@ -17,6 +21,12 @@ data class TestUser(val id: UUID, val email: String, val tokens: TokenPair) {
  * extending this still share the one Spring context and container.
  */
 abstract class OrganizationApiTest : AuthenticatedApiTest() {
+
+    @Autowired
+    private lateinit var entityManager: EntityManager
+
+    @Autowired
+    private lateinit var transactionTemplate: TransactionTemplate
 
     private var accountCounter = 0
 
@@ -182,6 +192,50 @@ abstract class OrganizationApiTest : AuthenticatedApiTest() {
             .andReturn().response.contentAsString
 
         return UUID.fromString(JsonPath.read(response, "$.id"))
+    }
+
+    /** Issues an invitation through the real endpoint and returns the raw token. */
+    protected fun inviteToOrganization(
+        organizationId: UUID,
+        email: String,
+        caller: TestUser,
+    ): String {
+        val body = postJson(
+            "/api/organizations/$organizationId/invitations",
+            """{"email":"$email"}""",
+            caller.accessToken,
+        )
+            .andExpect(status().isCreated)
+            .andReturn().response.contentAsString
+
+        return JsonPath.read(body, "$.token")
+    }
+
+    /**
+     * Pushes an invitation past its expiry, standing in for the passage of a week.
+     *
+     * A native update rather than an entity save: `expires_at` is mapped non-updatable on
+     * purpose, so that nothing in production can quietly extend an invitation's life. A test
+     * that needs an expired one has to go round the mapping, which is the right amount of
+     * friction for something no application code should ever do.
+     */
+    protected fun expireInvitation(invitationId: UUID, by: Duration = Duration.ofDays(1)) {
+        val expiresAt = Instant.now().minus(by)
+
+        transactionTemplate.executeWithoutResult {
+            entityManager
+                .createNativeQuery(
+                    "UPDATE organization_invitations SET created_at = :createdAt, expires_at = :expiresAt " +
+                        "WHERE id = :id",
+                )
+                // Both timestamps move: an invitation expires because time passed, not
+                // because it was issued with an expiry already behind it. The
+                // `expires_at > created_at` check refuses the latter, correctly.
+                .setParameter("createdAt", expiresAt.minus(Duration.ofDays(7)))
+                .setParameter("expiresAt", expiresAt)
+                .setParameter("id", invitationId)
+                .executeUpdate()
+        }
     }
 
     protected companion object {

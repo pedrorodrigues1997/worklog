@@ -94,6 +94,7 @@ Testcontainers rather than substituting an in-memory database.
 | `JWT_REFRESH_TOKEN_TTL` | `30d`                                | Refresh-token lifetime. |
 | `JWT_CLOCK_SKEW`        | `5s`                                 | Tolerance on `exp`/`nbf`. |
 | `REFRESH_TOKEN_CLEANUP_CRON` | `0 0 3 * * *`                   | When expired refresh tokens are deleted. |
+| `INVITATION_TTL`        | `7d`                                 | How long an organization invitation stays usable. |
 | `RATE_LIMIT_ENABLED`    | `true`                               | Throttling of `/api/auth`. |
 | `RATE_LIMIT_CAPACITY`   | `20`                                 | Requests per window per client. |
 | `RATE_LIMIT_WINDOW`     | `1m`                                 | The window. |
@@ -444,6 +445,7 @@ endpoint that lists organizations globally.
 | `PATCH`  | `/api/organizations/{id}/members/{userId}`      | `OWNER`, `ADMIN`       |
 | `DELETE` | `/api/organizations/{id}/members/{userId}`      | `OWNER`, `ADMIN`       |
 | `POST`   | `/api/organizations/{id}/transfer-ownership`    | `OWNER`                |
+| `POST`   | `/api/organizations/{id}/invitations`           | `OWNER`, `ADMIN`       |
 
 ### Example
 
@@ -582,10 +584,11 @@ everyone including its owner. Purging and restoring are separate deliberate oper
 
 ### Joining an organization
 
-Only two things create a membership: founding an organization, and (later) accepting an
-invitation. There is deliberately no "add this email to my organization" endpoint — that
-would attach a stranger's account to a tenant without their consent. Invitations get their
-own table and flow; nothing in the membership model needs to change to accommodate them.
+Only two things create a membership: founding an organization, and accepting an invitation
+(see [Invitations](#invitations)). There is deliberately no "add this email to my
+organization" endpoint — that would attach a stranger's account to a tenant without their
+consent. An invitation is the consenting version of the same thing, and it grants `MEMBER`
+and nothing else.
 
 ## Closing an account
 
@@ -631,6 +634,119 @@ matters when seats are billed, where the fix is to count through `users.deleted_
 
 The invariant all of this protects: **an active organization is never owned by a closed
 account.**
+
+## Invitations
+
+How a company gets its people in. Until this existed, the only way into an organization was
+founding it — everything else required writing `organization_members` rows by hand.
+
+```
+OWNER / ADMIN ──▶ invite email ──▶ invitation + random token ──▶ (email, later)
+                                                                      │
+                          ┌───────────────────────────────────────────┘
+                          ▼
+          has an account ──▶ sign in ──▶ POST /api/invitations/accept    ──▶ MEMBER
+          no account     ──▶            POST /api/invitations/register   ──▶ MEMBER
+```
+
+Email delivery is not implemented. Until it is, the raw token comes back in the create
+response so the flow can be exercised end to end.
+
+| Method | Path | Who |
+| ------ | ---- | --- |
+| `POST` | `/api/organizations/{orgId}/invitations` | `OWNER`, `ADMIN` |
+| `POST` | `/api/invitations/accept` | any authenticated user |
+| `POST` | `/api/invitations/register` | public |
+
+```bash
+# Invite. The response carries the raw token - the only moment it exists outside the database.
+curl -X POST http://localhost:8080/api/organizations/$ORG_ID/invitations \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"email":"bob@example.com"}'
+
+# Already has an account: sign in first, then accept. Identity comes from the access token.
+curl -X POST http://localhost:8080/api/invitations/accept \
+  -H "Authorization: Bearer $BOBS_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"token":"..."}'
+
+# No account yet: register and join in one transaction.
+curl -X POST http://localhost:8080/api/invitations/register -H 'Content-Type: application/json' \
+  -d '{"token":"...","firstName":"Bob","lastName":"Smith",
+       "email":"bob@example.com","password":"correct-horse-battery"}'
+```
+
+### Why acceptance is two endpoints
+
+The brief for this feature sketched one public `POST /api/invitations/accept`. The security
+configuration rules that out, and the split is better anyway: the `@Order(1)` chain that
+serves the public POSTs **deliberately ignores the `Authorization` header** (see
+[Authentication](#authentication)), so an endpoint on it cannot know who is calling —
+and acceptance by an existing user has to know exactly that, from a verified token rather
+than from the request body.
+
+So `/accept` sits on the default-deny chain and requires authentication, while `/register`
+is public and takes the credentials registration has always required. Possessing an
+invitation is not the same as having proved who you are.
+
+### Lifecycle
+
+Three timestamps, no status column — pending, expired and accepted are all derivable, and a
+fourth representation is a fourth thing that can disagree with the others:
+
+```
+pending  = accepted_at IS NULL AND expires_at >  now()
+expired  = accepted_at IS NULL AND expires_at <= now()
+accepted = accepted_at IS NOT NULL
+```
+
+Invitations last **7 days** by default (`INVITATION_TTL`) — long enough to survive a weekend,
+short enough that a forwarded link stops working before it matters. An accepted invitation
+can never be accepted again.
+
+At most one *un-accepted* invitation exists per organization and address, enforced by a
+partial unique index. "Pending" can't go in an index predicate — `now()` isn't immutable —
+so the index covers the wider un-accepted set and the application deletes a lapsed invitation
+before issuing its replacement. Re-inviting after an invitation expires works; issuing a
+second live one does not (`409`).
+
+### The token
+
+A 256-bit CSPRNG value, URL-safe Base64, stored **only as its SHA-256** — the same recipe as
+refresh tokens and OAuth handoff codes, now shared as `SecureToken`. It is not the row id,
+not a JWT, and appears in exactly one place: the create response. Nothing persists or logs
+the raw value, and the entity's `toString` omits the hash as well.
+
+Acceptance hashes the presented token and looks the invitation up by hash. Single-use:
+`accepted_at` is stamped in the same transaction as the membership.
+
+### What acceptance guarantees
+
+- **Always `MEMBER`.** There is no role field on an invitation. Letting the inviter choose
+  would let an ADMIN mint another ADMIN — or an OWNER — through a side door that bypasses the
+  rank rules the membership API enforces.
+- **The invitee is the invited person.** For an existing user the email is compared against
+  the account behind a signature-verified access token, never against anything in the body —
+  Bob holding Alice's link gets `403`. For a new user the account is created *at* the invited
+  address, so an invitation to Alice cannot create Bob.
+- **One transaction.** Membership and `accepted_at` land together; a failure anywhere leaves
+  no account, no membership and an invitation that still works.
+- **One organization.** Neither acceptance endpoint takes an organization id — it comes off
+  the invitation row — so there is no parameter to manipulate and no way to point an
+  invitation for one company at membership in another.
+- **Once.** Concurrent acceptance serialises on `SELECT … FOR UPDATE` of the invitation row,
+  and `organization_members (organization_id, user_id)` remains the final guarantee.
+
+| Situation | Response |
+| --- | --- |
+| MEMBER tries to invite | `403` |
+| non-member tries to invite | `404` |
+| invalid email | `400` (the same validation registration applies) |
+| already a member · duplicate pending invitation | `409` |
+| unknown token | `404` |
+| expired · already accepted · organization since closed | `409` |
+| authenticated user is not the invitee | `403` |
+| registration email ≠ invited email | `422` |
+| registration email already has an account | `409` |
 
 ## Projects
 
@@ -1088,10 +1204,10 @@ Code is organised by business domain, not by technical layer:
 ```
 com.tictac.io
 ├── common/          API error handling
-│   ├── security/    CurrentUser
+│   ├── security/    CurrentUser, SecureToken
 │   └── ratelimit/   throttling for the auth endpoints
 ├── user/            the user entity, ActiveUser, GET/DELETE /api/users/me
-├── organization/    organizations, memberships, roles, tenant-scoped authorization
+├── organization/    organizations, memberships, roles, invitations, tenant-scoped authorization
 ├── project/         projects, categories, assignments, project-scoped authorization
 ├── timetracking/    time entries, the timer, entry-scoped authorization
 └── authentication/  registration, login, refresh, logout, HTTP security

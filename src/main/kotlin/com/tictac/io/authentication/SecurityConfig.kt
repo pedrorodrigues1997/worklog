@@ -83,11 +83,29 @@ class SecurityConfig {
         const val OAUTH_EXCHANGE_PATH = "/api/auth/oauth/exchange"
 
         /**
+         * Registering through an invitation. Public because the invitee has no account yet -
+         * the invitation token is what they present instead, and the endpoint creates the
+         * account before it does anything else.
+         *
+         * Note that accepting an invitation as an *existing* user is deliberately NOT here:
+         * it needs to know who is calling, and this chain ignores the Authorization header on
+         * purpose, so it lives on the default-deny chain instead.
+         */
+        const val INVITATION_REGISTER_PATH = "/api/invitations/register"
+
+        /**
          * All of these are authenticated by something other than an access token:
          * credentials for login, a refresh token for refresh and logout, a single-use code
          * for the OAuth exchange, nothing at all for register.
          */
         val PUBLIC_POST_PATHS =
-            listOf(REGISTER_PATH, LOGIN_PATH, REFRESH_PATH, LOGOUT_PATH, OAUTH_EXCHANGE_PATH)
+            listOf(
+                REGISTER_PATH,
+                LOGIN_PATH,
+                REFRESH_PATH,
+                LOGOUT_PATH,
+                OAUTH_EXCHANGE_PATH,
+                INVITATION_REGISTER_PATH,
+            )
     }
 }

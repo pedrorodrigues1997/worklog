@@ -1,16 +1,13 @@
 package com.tictac.io.authentication.token
 
+import com.tictac.io.common.security.SecureToken
 import org.slf4j.LoggerFactory
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
-import java.security.MessageDigest
-import java.security.SecureRandom
 import java.time.Instant
-import java.util.Base64
-import java.util.HexFormat
 import java.util.UUID
 
 interface RefreshTokenRepository : JpaRepository<RefreshToken, UUID> {
@@ -40,7 +37,6 @@ class RefreshTokenService(
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
-    private val secureRandom = SecureRandom()
 
     /**
      * Refresh tokens are opaque random values, not JWTs. A JWT would be self-validating
@@ -121,20 +117,7 @@ class RefreshTokenService(
         return saved to IssuedRefreshToken(rawToken, expiresAt)
     }
 
-    private fun generateRawToken(): String {
-        val bytes = ByteArray(TOKEN_BYTES)
-        secureRandom.nextBytes(bytes)
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
-    }
+    private fun generateRawToken(): String = SecureToken.generate()
 
-    private fun hash(rawToken: String): String =
-        HexFormat.of().formatHex(
-            MessageDigest.getInstance(HASH_ALGORITHM).digest(rawToken.toByteArray(Charsets.UTF_8)),
-        )
-
-    companion object {
-        /** 256 bits from a CSPRNG - far beyond guessing range. */
-        const val TOKEN_BYTES = 32
-        const val HASH_ALGORITHM = "SHA-256"
-    }
+    private fun hash(rawToken: String): String = SecureToken.hash(rawToken)
 }

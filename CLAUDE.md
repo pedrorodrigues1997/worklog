@@ -44,6 +44,7 @@ com.tictac.io
 ├── common/
 │   ├── ApiExceptionHandler.kt      RFC 9457 problem+json for the whole API
 │   ├── security/CurrentUser.kt     the caller's id, from the verified token only
+│   ├── security/SecureToken.kt     CSPRNG + SHA-256 for every opaque bearer secret
 │   └── ratelimit/                  token bucket + filter for /api/auth
 ├── user/
 │   ├── User.kt, UserRepository.kt
@@ -56,6 +57,8 @@ com.tictac.io
 │   ├── OrganizationRole.kt         OWNER/ADMIN/MEMBER + the whole membership policy
 │   ├── OrganizationAccess.kt       THE tenant-scoped authorisation gate
 │   ├── OrganizationOwnershipService.kt  the only operation that moves OWNER
+│   ├── OrganizationInvitation*.kt       issuing invitations
+│   ├── InvitationAcceptanceService.kt   consuming them, by an existing or a new account
 │   └── Organization*Service.kt     creation, settings, membership management
 ├── project/
 │   ├── Project*.kt                 entity, repository, DTOs, controllers
@@ -90,6 +93,7 @@ anything, and startup fails if a mapping and a migration have drifted apart.
 | `refresh_tokens` | server-side refresh state: `token_hash`, `expires_at`, `revoked_at`, `replaced_by_id` |
 | `user_identities` | `(user_id, provider, provider_user_id)` — external logins |
 | `oauth_login_codes` | single-use codes handing an OAuth sign-in to the frontend |
+| `organization_invitations` | `id`, `organization_id`, `email`, `invited_by_user_id`, `token_hash`, `expires_at`, `accepted_at`. State is the timestamps - no status column. Partial unique index on `(organization_id, email) WHERE accepted_at IS NULL` |
 | `organizations` | `organization_id`, `organization_name`, `created_at`, `deleted_at` (soft delete) |
 | `organization_members` | `(organization_id, user_id)` unique, `role`; one OWNER per org via a partial unique index |
 | `projects` | `project_id`, `organization_id`, `project_name`, `description`, `is_active` (archive flag, not a soft delete), `created_at`, `updated_at` |
@@ -270,6 +274,27 @@ them fail, the change is wrong, not the test.
     refused past it; a running timer is *clamped* on stop instead, because refusing would
     leave someone holding a timer they could never close. Displayed elapsed time is clamped
     to match.
+33. **Opaque bearer secrets all go through `SecureToken`** - refresh tokens, OAuth handoff
+    codes, invitation tokens. 256-bit CSPRNG, URL-safe Base64, SHA-256 at rest, raw value
+    never stored and never logged. Do not write a fourth copy of that recipe.
+34. **An invitation grants MEMBER and nothing else.** No role field exists on it. Letting an
+    inviter choose would let an ADMIN mint an ADMIN or an OWNER through a side door that
+    bypasses `OrganizationRole.canAssign`.
+35. **The invitee must be the invited person.** Existing user: their email is compared to the
+    account behind a verified access token, never to anything in the body. New user: the
+    account is created *at* the invited address. Possession of the token proves possession of
+    the link, not identity.
+36. **No acceptance endpoint takes an organization id** - it comes off the invitation row.
+    That is the whole tenant-isolation story for invitations: there is no parameter to
+    tamper with.
+37. **Acceptance is one transaction and single-use**, serialised by `SELECT ... FOR UPDATE`
+    on the invitation row, with `organization_members (organization_id, user_id)` behind it.
+    Membership is written before `accepted_at`, so a partial failure leaves the invitation
+    usable rather than consumed.
+38. **`/api/invitations/accept` is authenticated; `/api/invitations/register` is public.**
+    The public POST chain ignores the Authorization header on purpose (invariant 2's chain),
+    so acceptance-as-an-existing-user cannot live there. Do not "simplify" these into one
+    public endpoint.
 
 ### OAuth flow, in one picture
 
@@ -311,13 +336,13 @@ must be the `jdbc:postgresql://…` form.
 docker compose up -d                 # PostgreSQL 17 on :5432
 set -a; source .env; set +a
 ./mvnw spring-boot:run
-./mvnw clean verify                  # 514 tests; Docker must be running
+./mvnw clean verify                  # 567 tests; Docker must be running
 ```
 
 - **Real PostgreSQL via Testcontainers.** No in-memory substitute — it would not catch a
   mismatch between a migration and a mapping.
 - `PostgresIntegrationTest` is the base: `@SpringBootTest` + MockMvc + container, and a
-  `@BeforeEach` that clears all ten tables children-first. `AuthenticatedApiTest` extends it
+  `@BeforeEach` that clears all eleven tables children-first. `AuthenticatedApiTest` extends it
   with register/login helpers that go through the **real** endpoints and filter chain.
 - All base-derived tests share one Spring context (and one container). A test that overrides
   properties gets its own context and its own container — currently
@@ -390,6 +415,10 @@ invitations, leaving an organisation or a project voluntarily, per-project roles
 permission model finer than the three organisation roles, and anything that aggregates time
 entries - reporting, timesheets, approvals, invoicing.
 
+Invitations now exist, so tests no longer *have* to seed `organization_members` directly -
+`OrganizationApiTest.inviteToOrganization` drives the real endpoints. `addMember` is still
+there for tests that need a specific role, since an invitation only ever grants MEMBER.
+
 **This is a time-tracking product, not a task manager.** The vocabulary is Project, Project
 Category, Time Entry, Timer. Do not introduce tasks, subtasks, assignment, status, due dates,
 priorities or dependencies - a category is a *kind of work*, not a unit of work.
@@ -409,8 +438,13 @@ Known open items in what *is* built:
 - UUIDv4 primary keys are random, which hurts index locality. Irrelevant for `users`; decide
   before `time_entries`, where the row count will actually live.
 - OAuth-created users can have a blank `last_name` if Google returns no family name.
-- No invitations, so the only way into an organisation is founding one. Membership rows for
-  anyone else currently have to be seeded directly (the tests do this deliberately).
+- Invitations have no list, resend or revoke endpoint. An administrator cannot see who has
+  been invited, and a mistaken invitation can only be waited out (7 days) or deleted in the
+  database. That is the first thing to add.
+- Email delivery does not exist, so the raw invitation token is returned by the create
+  endpoint. That must stop being returned the moment a mail provider is wired up.
+- An invitation only ever grants MEMBER; there is no way to invite an ADMIN directly, so a
+  new administrator has to be invited and then promoted.
 - Account closure keeps non-owner membership rows, by decision (see `AccountClosureService`).
   They are inert and invisible, but an organisation's member count and its
   `organization_members` row count therefore differ. Seat counting must go through

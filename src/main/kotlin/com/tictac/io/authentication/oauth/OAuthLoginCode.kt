@@ -1,5 +1,6 @@
 package com.tictac.io.authentication.oauth
 
+import com.tictac.io.common.security.SecureToken
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
 import jakarta.persistence.GeneratedValue
@@ -11,11 +12,7 @@ import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
-import java.security.MessageDigest
-import java.security.SecureRandom
 import java.time.Instant
-import java.util.Base64
-import java.util.HexFormat
 import java.util.UUID
 
 @Entity
@@ -61,8 +58,6 @@ class OAuthLoginCodeService(
     private val properties: OAuth2Properties,
 ) {
 
-    private val secureRandom = SecureRandom()
-
     @Transactional
     fun issue(userId: UUID): String {
         val code = generateCode()
@@ -99,18 +94,7 @@ class OAuthLoginCodeService(
     @Transactional
     fun deleteExpiredBefore(cutoff: Instant): Int = repository.deleteExpiredBefore(cutoff)
 
-    private fun generateCode(): String {
-        val bytes = ByteArray(CODE_BYTES)
-        secureRandom.nextBytes(bytes)
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
-    }
+    private fun generateCode(): String = SecureToken.generate()
 
-    private fun hash(rawCode: String): String =
-        HexFormat.of().formatHex(
-            MessageDigest.getInstance("SHA-256").digest(rawCode.toByteArray(Charsets.UTF_8)),
-        )
-
-    private companion object {
-        const val CODE_BYTES = 32
-    }
+    private fun hash(rawCode: String): String = SecureToken.hash(rawCode)
 }
