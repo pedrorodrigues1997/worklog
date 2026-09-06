@@ -1,5 +1,6 @@
 package com.tictac.io.timetracking
 
+import com.tictac.io.project.ProjectCategoryRepository
 import com.tictac.io.project.ProjectRepository
 import org.springframework.stereotype.Service
 import java.time.Instant
@@ -21,33 +22,53 @@ import java.util.UUID
 @Service
 class TimeEntryResponses(
     private val projectRepository: ProjectRepository,
+    private val projectCategoryRepository: ProjectCategoryRepository,
 ) {
 
     fun of(entry: TimeEntry, now: Instant): TimeEntryResponse {
-        // Inside the same transaction the project is normally already in the persistence
-        // context - resolved by ProjectAccess moments earlier - so this is a cache hit.
-        val name = projectRepository.findById(entry.projectId).map { it.name }.orElse(UNKNOWN_PROJECT)
+        // Inside the same transaction both are normally already in the persistence context -
+        // resolved by ProjectAccess moments earlier - so these are cache hits.
+        val projectName = projectRepository.findById(entry.projectId).map { it.name }.orElse(UNKNOWN_PROJECT)
+        val categoryName = entry.projectCategoryId
+            ?.let { projectCategoryRepository.findById(it).map { category -> category.name }.orElse(null) }
 
-        return build(entry, name, now)
+        return build(entry, projectName, categoryName, now)
     }
 
     fun of(entries: List<TimeEntry>, now: Instant): List<TimeEntryResponse> {
         if (entries.isEmpty()) return emptyList()
 
-        val namesById: Map<UUID, String> = projectRepository
+        val projectNames: Map<UUID, String> = projectRepository
             .findAllById(entries.map { it.projectId }.distinct())
             .associate { it.id!! to it.name }
 
-        return entries.map { build(it, namesById[it.projectId] ?: UNKNOWN_PROJECT, now) }
+        // One query for every category on the page, however many entries share them - and
+        // none at all when nothing on the page is categorised.
+        val categoryNames: Map<UUID, String> = entries.mapNotNull { it.projectCategoryId }.distinct()
+            .takeIf { it.isNotEmpty() }
+            ?.let { ids -> projectCategoryRepository.findAllById(ids).associate { it.id!! to it.name } }
+            .orEmpty()
+
+        return entries.map {
+            build(
+                it,
+                projectNames[it.projectId] ?: UNKNOWN_PROJECT,
+                it.projectCategoryId?.let { id -> categoryNames[id] },
+                now,
+            )
+        }
     }
 
-    private fun build(entry: TimeEntry, projectName: String, now: Instant) =
+    private fun build(entry: TimeEntry, projectName: String, categoryName: String?, now: Instant) =
         TimeEntryResponse(
             id = entry.id!!,
             organizationId = entry.organizationId,
             projectId = entry.projectId,
             projectName = projectName,
+            projectCategoryId = entry.projectCategoryId,
+            projectCategoryName = categoryName,
             userId = entry.userId,
+            title = entry.title,
             description = entry.description,
             startedAt = entry.startedAt,
             endedAt = entry.endedAt,

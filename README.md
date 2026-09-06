@@ -775,14 +775,103 @@ cascade; closure does not — the person is still an organization member, their 
 simply closed — so their assignment rows stay, inert, and are filtered out of every listing
 along with the closed accounts themselves.
 
+## Project categories
+
+A category is a **kind of work within one project** — a subdivision, not an entity of its
+own. There is no global category list: "Development" in one project and "Development" in
+another are two unrelated rows, because a category only means something relative to the
+project that defines it.
+
+```
+Website Redesign          Marketing Campaign
+├── Development           ├── Content
+├── Design                ├── Social Media
+├── Meetings              ├── Advertising
+└── Testing               └── Meetings
+```
+
+A category is **optional** on a time entry, and a project with zero categories is valid.
+Nothing is created by default and nobody has to invent a taxonomy to log an hour.
+
+| Method  | Path | Who |
+| ------- | ---- | --- |
+| `POST`  | `/api/organizations/{orgId}/projects/{projectId}/categories` | `OWNER`, `ADMIN` |
+| `GET`   | `/api/organizations/{orgId}/projects/{projectId}/categories` | anyone who can see the project |
+| `GET`   | `/api/organizations/{orgId}/projects/{projectId}/categories/{categoryId}` | anyone who can see the project |
+| `PATCH` | `/api/organizations/{orgId}/projects/{projectId}/categories/{categoryId}` | `OWNER`, `ADMIN` |
+
+```bash
+curl -X POST http://localhost:8080/api/organizations/$ORG_ID/projects/$PROJECT_ID/categories \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"Development","description":"Software development work"}'
+```
+
+Categories are project **configuration**, which is what decides who may touch them: `OWNER`
+and `ADMIN` configure, a `MEMBER` reads the list and picks from it when tracking time. That
+is the same split as project settings and reuses the same gate — there is no second
+authorization system.
+
+### Names
+
+Unique per project, **case-insensitively**: `Development` and `development` are the same
+category to a person choosing from a dropdown, so they are the same category here. Enforced
+by a functional unique index on `(project_id, lower(name))`, not by an application check
+alone. The same name in a *different* project is fine.
+
+An archived category still holds its name — reactivating the old "Meetings" is the way back,
+not creating a second one nobody can tell apart in a report.
+
+### Lifecycle
+
+```
+active  ──▶  inactive  ──▶  active
+```
+
+`is_active` is the whole lifecycle and there is **no `DELETE` endpoint**. Time entries point
+at categories, so a category is retired and kept; the historical entries naming it must keep
+resolving. An inactive category:
+
+- stays visible to `OWNER`/`ADMIN` via `?includeInactive=true`;
+- disappears from the default listing everyone else sees;
+- **cannot** be chosen for a new timer or a new manual entry (`409`);
+- **remains** on every historical entry that already names it, and may still be chosen when
+  *editing* one.
+
+A `MEMBER` cannot use `?includeInactive=true` to see more than they should — the flag is
+ignored for them rather than refused, since the honest answer to a question about
+configuration they do not administer is the active list they were always going to get.
+
+Listing is ordered by name ascending, with an id tiebreaker so the order never depends on
+collation.
+
+### The project/category invariant
+
+If a time entry names a category, that category **must belong to the entry's own project**.
+This is enforced twice, and neither layer relies on the other being right:
+
+- the application resolves a category by `(category id, project id)` together, so one
+  borrowed from a sibling project resolves to nothing;
+- the database has a **composite foreign key** from `time_entries (project_category_id,
+  project_id)` onto `project_categories (project_category_id, project_id)`. Under the default
+  `MATCH SIMPLE` rule it is skipped entirely when the category is null — so "no category"
+  stays free while "some other project's category" is impossible to write at all.
+
+Moving an entry to another project therefore drops its category unless a new one is supplied
+in the same request.
+
 ## Time tracking
 
 The product. A user picks an organization, picks a project they may record against, and
 starts a timer — or records the work by hand afterwards.
 
 ```
-select organization → select project → start timer → … → stop → time entry
+select organization → select project → select category (optional)
+                    → title → optional description → start timer → … → stop
 ```
+
+A time entry is **who + project + optional category + title + optional description + time +
+billable**. The title is what the user was working on and is required; everything optional
+above is genuinely optional.
 
 All endpoints are nested under the organization, require a valid access token, and are
 checked against organization membership, organization role and project access before
@@ -805,7 +894,8 @@ anything is written.
 # Start. The endpoint accepts no timestamp - started_at is server time, always.
 curl -X POST http://localhost:8080/api/organizations/$ORG_ID/time-entries/timer \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"projectId":"...","description":"Implement authentication","billable":true}'
+  -d '{"projectId":"...","projectCategoryId":"...","title":"Implement OAuth",
+       "description":"Working on Google OAuth","billable":true}'
 
 # Stop. Also takes no timestamp.
 curl -X POST http://localhost:8080/api/organizations/$ORG_ID/time-entries/$ENTRY_ID/stop \
@@ -814,11 +904,20 @@ curl -X POST http://localhost:8080/api/organizations/$ORG_ID/time-entries/$ENTRY
 
 ```json
 {
-  "id": "...", "projectId": "...", "projectName": "Website Redesign", "userId": "...",
-  "description": "Implement authentication",
+  "id": "...", "projectId": "...", "projectName": "Website Redesign",
+  "projectCategoryId": "...", "projectCategoryName": "Development",
+  "userId": "...", "title": "Implement OAuth", "description": "Working on Google OAuth",
   "startedAt": "2026-09-06T09:00:48Z", "endedAt": null,
   "durationSeconds": 3821, "running": true, "billable": true
 }
+```
+
+Both category fields are `null` for time tracked straight against a project, which is an
+ordinary and fully supported shape:
+
+```json
+{ "projectId": "...", "projectCategoryId": null, "projectCategoryName": null,
+  "title": "General project work", "description": null }
 ```
 
 **The database is the source of truth, not the browser.** A running timer is a row whose
@@ -833,6 +932,12 @@ instruction to stop the first — a client that silently closed half an hour of 
 because a button was double-clicked would be worse than a rejected request. The limit is per
 *organization*, so someone consulting for two companies can be on the clock at both.
 
+**A running timer's project and category are fixed.** They record the selection made when it
+started; changing them mid-flight would mean the elapsed time belonged partly to one project
+and partly to another with nothing recording where the boundary was. To track different work,
+stop and start again. Archiving the category (or the project) does not stop a running timer —
+it can be stopped normally, it just cannot be chosen for a new one.
+
 **Only the owner may stop their own timer**, administrator or not. Stopping asserts what
 someone is doing at this second, and nobody else is in a position to say. An administrator
 who needs to close an abandoned timer edits the entry and sets its end explicitly, which
@@ -844,7 +949,8 @@ and leaves the first stop's timestamp and duration intact.
 ```bash
 curl -X POST http://localhost:8080/api/organizations/$ORG_ID/time-entries \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"projectId":"...","description":"Client meeting",
+  -d '{"projectId":"...","projectCategoryId":"...","title":"Client meeting",
+       "description":"Reviewed homepage designs",
        "startedAt":"2026-09-01T13:00:00+04:00","endedAt":"2026-09-01T15:00:00+04:00",
        "billable":true}'
 ```
@@ -854,8 +960,22 @@ derived by the server** — there is no duration field on any request DTO, so a 
 value has nowhere to land rather than being accepted and ignored. Any edit that moves either
 timestamp recalculates it.
 
-`PATCH` accepts `projectId`, `description`, `startedAt`, `endedAt` and `billable`; absent
-fields are left alone. Neither the organization nor the user is editable, and neither appears
+**Title and description.** The title is required on every path that records time, trimmed
+before it is judged, 1–255 characters; a whitespace-only title is refused. The description is
+optional, at most 5000 characters, and blank is stored as nothing. Both fail with **422**, not
+400: a missing `projectId` means the request was malformed, while a title of three spaces
+means the request was fine and the value is not one the domain accepts — different problems
+for a client to handle.
+
+**No entry may span more than 24 hours.** A manual entry or an edit beyond that is refused
+(422); a *timer* left running longer stops at the cap instead of being refused, because a
+timer nobody can close is worse than one that records a day. The elapsed time shown for a
+running timer is capped the same way, so it never displays a number larger than the one it
+would record.
+
+`PATCH` accepts `projectId`, `projectCategoryId`, `title`, `description`, `startedAt`,
+`endedAt` and `billable`; absent fields are left alone. Because absent and `null` mean the
+same thing, removing a category is said explicitly with `{"clearProjectCategory": true}`. Neither the organization nor the user is editable, and neither appears
 in the request, so no shape of PATCH moves billable history between tenants or reattributes
 someone else's work. `endedAt` cannot be cleared either — "un-stopping" an entry would
 resurrect a second running timer.
@@ -909,7 +1029,7 @@ tracked, it does not reach in and end work in progress.
 ### Listing
 
 ```
-GET .../time-entries?page=0&size=50&projectId=…&userId=…&from=…&to=…&billable=true
+GET .../time-entries?page=0&size=50&projectId=…&projectCategoryId=…&userId=…&from=…&to=…&billable=true
 ```
 
 Ordering is fixed server-side: `startedAt DESC, id DESC`. The tiebreaker is not decoration —
@@ -972,7 +1092,7 @@ com.tictac.io
 │   └── ratelimit/   throttling for the auth endpoints
 ├── user/            the user entity, ActiveUser, GET/DELETE /api/users/me
 ├── organization/    organizations, memberships, roles, tenant-scoped authorization
-├── project/         projects, assignments, project-scoped authorization
+├── project/         projects, categories, assignments, project-scoped authorization
 ├── timetracking/    time entries, the timer, entry-scoped authorization
 └── authentication/  registration, login, refresh, logout, HTTP security
     ├── token/       JWT issuing/decoding, refresh-token state and cleanup

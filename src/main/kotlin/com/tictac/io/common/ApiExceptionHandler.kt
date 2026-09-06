@@ -10,13 +10,17 @@ import com.tictac.io.organization.InvalidOwnershipTransferException
 import com.tictac.io.organization.OrganizationMemberNotFoundException
 import com.tictac.io.organization.OrganizationNotFoundException
 import com.tictac.io.organization.OwnershipTransferConflictException
+import com.tictac.io.project.DuplicateProjectCategoryNameException
 import com.tictac.io.project.ProjectAssignmentConflictException
+import com.tictac.io.project.ProjectCategoryNotActiveException
+import com.tictac.io.project.ProjectCategoryNotFoundException
+import com.tictac.io.project.ProjectCategoryValidationException
+import com.tictac.io.project.ProjectNotActiveException
 import com.tictac.io.project.ProjectMemberNotFoundException
 import com.tictac.io.project.ProjectNotFoundException
-import com.tictac.io.timetracking.InvalidTimeRangeException
-import com.tictac.io.timetracking.ProjectNotActiveException
 import com.tictac.io.timetracking.TimeEntryNotFoundException
 import com.tictac.io.timetracking.TimeEntryNotRunningException
+import com.tictac.io.timetracking.TimeEntryValidationException
 import com.tictac.io.timetracking.TimerAlreadyRunningException
 import com.tictac.io.user.AccountClosureBlockedException
 import org.slf4j.LoggerFactory
@@ -193,11 +197,51 @@ class ApiExceptionHandler : ResponseEntityExceptionHandler() {
             title = "Project is archived"
         }
 
-    /** The two ends of a time entry do not make an interval. */
-    @ExceptionHandler(InvalidTimeRangeException::class)
-    fun handleInvalidTimeRange(ex: InvalidTimeRangeException): ProblemDetail =
-        ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.message).apply {
-            title = "Invalid time range"
+    /**
+     * A well-formed time-entry request carrying a value the domain refuses - a blank title,
+     * an interval that runs backwards or spans more than a day.
+     *
+     * 422 rather than 400, which is reserved for a malformed request: Bean Validation still
+     * answers "you omitted projectId" with 400 and a per-field map. The split is worth
+     * keeping because the two need different handling by a client - one is a bug, the other
+     * is something to show the user next to the field they typed.
+     */
+    @ExceptionHandler(TimeEntryValidationException::class)
+    fun handleTimeEntryValidation(ex: TimeEntryValidationException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_ENTITY, ex.message).apply {
+            title = "Invalid time entry"
+        }
+
+    /** The category does not exist, or belongs to a different project. One answer for both. */
+    @ExceptionHandler(ProjectCategoryNotFoundException::class)
+    fun handleProjectCategoryNotFound(ex: ProjectCategoryNotFoundException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.message).apply {
+            title = "Project category not found"
+        }
+
+    /**
+     * A retired category cannot be chosen for new work. Distinguishable from "not found"
+     * deliberately: the caller can see it in the project's listing, so its state is not a
+     * secret, and this is the message that says what to do about it.
+     */
+    @ExceptionHandler(ProjectCategoryNotActiveException::class)
+    fun handleProjectCategoryNotActive(ex: ProjectCategoryNotActiveException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "Category is archived"
+        }
+
+    /** Another category in the project already holds this name, ignoring case. */
+    @ExceptionHandler(DuplicateProjectCategoryNameException::class)
+    fun handleDuplicateProjectCategoryName(ex: DuplicateProjectCategoryNameException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "Duplicate category name"
+        }
+
+    /** A category name or description that is well-formed JSON but not a usable value. */
+    @ExceptionHandler(ProjectCategoryValidationException::class)
+    fun handleProjectCategoryValidation(ex: ProjectCategoryValidationException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_ENTITY, ex.message).apply {
+            title = "Invalid project category"
         }
 
     /**

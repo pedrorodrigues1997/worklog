@@ -4,7 +4,10 @@ import com.tictac.io.organization.OrganizationAccess
 import com.tictac.io.organization.OrganizationContext
 import com.tictac.io.organization.OrganizationRole
 import com.tictac.io.project.ProjectAccess
+import com.tictac.io.project.ProjectCategory
+import com.tictac.io.project.ProjectCategoryNotActiveException
 import com.tictac.io.project.ProjectContext
+import com.tictac.io.project.ProjectNotActiveException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.util.UUID
@@ -24,12 +27,15 @@ class TimerAlreadyRunningException :
 /** Stop was called on an entry that is not running. */
 class TimeEntryNotRunningException : RuntimeException("This time entry is not running")
 
-/** New time cannot be tracked against an archived project. */
-class ProjectNotActiveException :
-    RuntimeException("This project is archived and cannot be used for new time entries")
+/**
+ * A well-formed request carrying a value the domain will not accept - a blank title, an
+ * interval that runs backwards, a day and a half in one entry. Distinct from Bean Validation
+ * failures, which mean the request itself was malformed; these produce 422 rather than 400.
+ */
+open class TimeEntryValidationException(message: String) : RuntimeException(message)
 
-/** The two ends of an entry do not make an interval. */
-class InvalidTimeRangeException(message: String) : RuntimeException(message)
+/** The two ends of an entry do not make an interval, or span more than a day. */
+class InvalidTimeRangeException(message: String) : TimeEntryValidationException(message)
 
 /**
  * What the caller may do with one time entry.
@@ -150,6 +156,49 @@ class TimeEntryAccess(
 
         return project
     }
+
+    /**
+     * The category a *new* entry will be recorded against: in the given project, and active.
+     *
+     * Resolved through [ProjectAccess.requireCategory], so the category is looked up by
+     * (category id, project id) together - a category borrowed from a sibling project in the
+     * same organization resolves to nothing, and the composite foreign key in V11 would
+     * refuse the write even if this check were removed.
+     *
+     * @throws ProjectCategoryNotActiveException if the category is retired. Distinguishable
+     *   from "not found" deliberately: the caller can see the category in the project's
+     *   listing, so its state is not a secret, and this is the message that says what to do.
+     */
+    @Transactional(readOnly = true)
+    fun requireCategoryForNewTime(organizationId: UUID, projectId: UUID, categoryId: UUID): ProjectCategory {
+        val category = projectAccess.requireCategory(organizationId, projectId, categoryId).category
+
+        if (!category.isActive) {
+            throw ProjectCategoryNotActiveException()
+        }
+
+        return category
+    }
+
+    /**
+     * The category an *existing* entry is being moved to, or keeping: in the given project,
+     * active or not.
+     *
+     * Retired categories are deliberately allowed here. Four hours recorded last quarter
+     * against "Old Development Category" stay valid, and correcting the title of that entry
+     * must not force its category to be resurrected or dropped. Same distinction as projects:
+     *
+     * ```
+     * new work        →  category must be active
+     * historical work →  retired is fine
+     * ```
+     */
+    @Transactional(readOnly = true)
+    fun requireCategoryForHistoricalTime(
+        organizationId: UUID,
+        projectId: UUID,
+        categoryId: UUID,
+    ): ProjectCategory = projectAccess.requireCategory(organizationId, projectId, categoryId).category
 
     /**
      * The project an *existing* entry is being moved to: visible to the caller, active or

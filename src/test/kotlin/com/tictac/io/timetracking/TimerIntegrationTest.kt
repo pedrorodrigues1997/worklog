@@ -42,7 +42,11 @@ class TimerIntegrationTest : OrganizationApiTest() {
     private fun timerPath() = "/api/organizations/$organizationId/time-entries/timer"
 
     private fun start(projectId: UUID, user: TestUser, billable: Boolean = false) =
-        postJson(timerPath(), """{"projectId":"$projectId","billable":$billable}""", user.accessToken)
+        postJson(
+            timerPath(),
+            """{"projectId":"$projectId","title":"Implement OAuth","billable":$billable}""",
+            user.accessToken,
+        )
 
     private fun stop(timeEntryId: UUID, user: TestUser) =
         postJson(
@@ -121,12 +125,13 @@ class TimerIntegrationTest : OrganizationApiTest() {
 
     @Test
     fun `starting requires authentication and a valid project id`() {
-        postJson(timerPath(), """{"projectId":"$assignedProject"}""").andExpect(status().isUnauthorized)
+        postJson(timerPath(), """{"projectId":"$assignedProject","title":"Work"}""")
+            .andExpect(status().isUnauthorized)
 
         listOf("""{}""", """{"projectId":null}""", """{"projectId":"not-a-uuid"}""")
             .forEach { postJson(timerPath(), it, bob.accessToken).andExpect(status().isBadRequest) }
 
-        postJson(timerPath(), """{"projectId":"${UUID.randomUUID()}"}""", bob.accessToken)
+        postJson(timerPath(), """{"projectId":"${UUID.randomUUID()}","title":"Work"}""", bob.accessToken)
             .andExpect(status().isNotFound)
 
         assertThat(timeEntryRepository.count()).isZero()
@@ -139,7 +144,8 @@ class TimerIntegrationTest : OrganizationApiTest() {
 
         val body = postJson(
             timerPath(),
-            """{"projectId":"$assignedProject","startedAt":"$faked","durationSeconds":99999,"endedAt":"$faked"}""",
+            """{"projectId":"$assignedProject","title":"Work","startedAt":"$faked"""" +
+                ""","durationSeconds":99999,"endedAt":"$faked"}""",
             bob.accessToken,
         ).andExpect(status().isCreated).andReturn().response.contentAsString
 

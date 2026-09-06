@@ -98,19 +98,54 @@ abstract class OrganizationApiTest : AuthenticatedApiTest() {
         ).andExpect(status().isOk)
     }
 
+    /** Creates a project category through the real endpoint. [creator] must be OWNER or ADMIN. */
+    protected fun createCategory(
+        organizationId: UUID,
+        projectId: UUID,
+        creator: TestUser,
+        name: String = "Development",
+        description: String? = null,
+    ): UUID {
+        val descriptionField = if (description == null) "" else ""","description":"$description""""
+        val response = postJson(
+            "/api/organizations/$organizationId/projects/$projectId/categories",
+            """{"name":"$name"""" + descriptionField + "}",
+            creator.accessToken,
+        )
+            .andExpect(status().isCreated)
+            .andReturn().response.contentAsString
+
+        return UUID.fromString(JsonPath.read(response, "$.id"))
+    }
+
+    /** Retires a category through the real endpoint. [caller] must be OWNER or ADMIN. */
+    protected fun archiveCategory(
+        organizationId: UUID,
+        projectId: UUID,
+        categoryId: UUID,
+        caller: TestUser,
+    ) {
+        patchJson(
+            "/api/organizations/$organizationId/projects/$projectId/categories/$categoryId",
+            """{"isActive":false}""",
+            caller.accessToken,
+        ).andExpect(status().isOk)
+    }
+
     /** Starts a timer through the real endpoint and returns the new entry's id. */
     protected fun startTimer(
         organizationId: UUID,
         projectId: UUID,
         user: TestUser,
+        title: String = DEFAULT_TIME_ENTRY_TITLE,
         description: String? = null,
         billable: Boolean = false,
+        categoryId: UUID? = null,
     ): UUID {
-        val body = if (description == null) {
-            """{"projectId":"$projectId","billable":$billable}"""
-        } else {
-            """{"projectId":"$projectId","description":"$description","billable":$billable}"""
-        }
+        val descriptionField = if (description == null) "" else ""","description":"$description""""
+        val categoryField = if (categoryId == null) "" else ""","projectCategoryId":"$categoryId""""
+        val body = """{"projectId":"$projectId","title":"$title","billable":$billable""" +
+            descriptionField + categoryField + "}"
 
         val response = postJson(
             "/api/organizations/$organizationId/time-entries/timer",
@@ -130,19 +165,26 @@ abstract class OrganizationApiTest : AuthenticatedApiTest() {
         user: TestUser,
         startedAt: Instant,
         endedAt: Instant,
+        title: String = DEFAULT_TIME_ENTRY_TITLE,
         description: String? = null,
         billable: Boolean = false,
+        categoryId: UUID? = null,
     ): UUID {
         val descriptionField = if (description == null) "" else ""","description":"$description""""
+        val categoryField = if (categoryId == null) "" else ""","projectCategoryId":"$categoryId""""
         val response = postJson(
             "/api/organizations/$organizationId/time-entries",
-            """{"projectId":"$projectId","startedAt":"$startedAt","endedAt":"$endedAt","billable":$billable""" +
-                descriptionField + "}",
+            """{"projectId":"$projectId","title":"$title","startedAt":"$startedAt"""" +
+                ""","endedAt":"$endedAt","billable":$billable""" + descriptionField + categoryField + "}",
             user.accessToken,
         )
             .andExpect(status().isCreated)
             .andReturn().response.contentAsString
 
         return UUID.fromString(JsonPath.read(response, "$.id"))
+    }
+
+    protected companion object {
+        const val DEFAULT_TIME_ENTRY_TITLE = "Tracked work"
     }
 }

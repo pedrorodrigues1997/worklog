@@ -36,6 +36,20 @@ class TimeEntry(
     @Column(name = "project_id", nullable = false)
     var projectId: UUID,
 
+    /**
+     * The kind of work, or null for time tracked straight against the project.
+     *
+     * Optional by design: a project with no categories is valid, and nobody should have to
+     * invent a taxonomy to log an hour. When it is set, a composite foreign key guarantees
+     * the category belongs to [projectId] - the pair moves together or not at all.
+     */
+    @Column(name = "project_category_id")
+    var projectCategoryId: UUID? = null,
+
+    /** What the work was. Required, trimmed, and never blank - see TimeEntryService. */
+    @Column(name = "title", nullable = false, length = MAX_TITLE_LENGTH)
+    var title: String = "",
+
     @Column(name = "user_id", nullable = false, updatable = false)
     val userId: UUID,
 
@@ -78,8 +92,14 @@ class TimeEntry(
      * out of step - and the only reason a client-supplied duration has nowhere to land.
      */
     fun stopAt(now: Instant) {
-        endedAt = now
-        durationSeconds = Duration.between(startedAt, now).seconds
+        // Capped rather than refused. A timer someone forgot on Friday should not be
+        // impossible to close on Monday, and it should not record the weekend either. The
+        // recorded end is the cap; if the real one differs, the entry can be edited - which
+        // is the honest way to state a duration nobody was actually present for.
+        val cap = startedAt.plus(MAX_DURATION)
+
+        endedAt = if (now.isAfter(cap)) cap else now
+        durationSeconds = Duration.between(startedAt, endedAt).seconds
     }
 
     /** Recomputes the duration after an edit. Null while the entry is still running. */
@@ -96,7 +116,10 @@ class TimeEntry(
      * updated every second to answer a question arithmetic already answers.
      */
     fun elapsedSecondsAt(now: Instant): Long =
-        durationSeconds ?: Duration.between(startedAt, now).seconds.coerceAtLeast(0)
+        durationSeconds
+            // Capped the same way stopping is, so a running timer never displays a number
+            // larger than the one it would record.
+            ?: Duration.between(startedAt, now).seconds.coerceIn(0, MAX_DURATION.seconds)
 
     /**
      * `@Transient` is load-bearing, not decoration. Hibernate resolves property access
@@ -118,7 +141,19 @@ class TimeEntry(
             "userId=$userId, running=${endedAt == null})"
 
     companion object {
+        const val MAX_TITLE_LENGTH = 255
+
         /** Bounded so a caller cannot post an unbounded blob into a TEXT column. */
-        const val MAX_DESCRIPTION_LENGTH = 2000
+        const val MAX_DESCRIPTION_LENGTH = 5000
+
+        /**
+         * The longest a single entry may span.
+         *
+         * A day is the natural ceiling for "time somebody spent working": anything longer is
+         * a forgotten timer or a typo, not a record worth billing. It bounds both ends -
+         * stopping clamps to it, and a manual entry beyond it is refused - so no path
+         * produces an entry claiming a week.
+         */
+        val MAX_DURATION: Duration = Duration.ofHours(24)
     }
 }

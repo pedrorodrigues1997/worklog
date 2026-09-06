@@ -19,6 +19,33 @@ import java.util.UUID
 class ProjectNotFoundException : RuntimeException("Project not found")
 
 /**
+ * The category does not exist, or belongs to a different project - indistinguishable, and
+ * for the same reason as above.
+ */
+class ProjectCategoryNotFoundException : RuntimeException("Project category not found")
+
+/**
+ * New work cannot be recorded against an archived project.
+ *
+ * Lives here rather than in the time-tracking package because it states a fact about a
+ * project, and both domains need it: time tracking refuses new entries against an archived
+ * project, and this package refuses new categories on one.
+ */
+class ProjectNotActiveException :
+    RuntimeException("This project is archived and cannot be used for new time entries")
+
+/** An archived category cannot be chosen for new work. */
+class ProjectCategoryNotActiveException :
+    RuntimeException("This category is archived and cannot be used for new time entries")
+
+/** Another category in this project already has this name, ignoring case. */
+class DuplicateProjectCategoryNameException :
+    RuntimeException("A category with this name already exists in this project")
+
+/** A category name or description that is well-formed JSON but not a usable value. */
+class ProjectCategoryValidationException(message: String) : RuntimeException(message)
+
+/**
  * Whether this organization role sees, and administers, every project in the organization.
  *
  * Visibility and management coincide today, which is why one predicate answers both. They
@@ -50,6 +77,22 @@ data class ProjectContext(
 }
 
 /**
+ * What the caller may do with one category, and the project it belongs to.
+ *
+ * Holding the whole [project] context rather than just its id means a caller that has
+ * resolved a category has also resolved - and been authorised for - the project underneath
+ * it, without a second lookup.
+ */
+data class ProjectCategoryContext(
+    val project: ProjectContext,
+    val category: ProjectCategory,
+) {
+    val categoryId: UUID get() = category.id!!
+    val projectId: UUID get() = project.projectId
+    val organizationRole: OrganizationRole get() = project.organizationRole
+}
+
+/**
  * The project-scoped authorisation gate, layered on top of [OrganizationAccess].
  *
  * The full chain, in order, every time:
@@ -77,6 +120,7 @@ class ProjectAccess(
     private val organizationAccess: OrganizationAccess,
     private val projectRepository: ProjectRepository,
     private val projectMemberRepository: ProjectMemberRepository,
+    private val projectCategoryRepository: ProjectCategoryRepository,
 ) {
 
     /**
@@ -120,6 +164,38 @@ class ProjectAccess(
         }
 
         return ProjectContext(organization, project, assignment)
+    }
+
+    /**
+     * Resolves a category within a project within an organization - the whole chain in one
+     * call, so no caller has to remember the order or the joins.
+     *
+     * The category is looked up by (category id, project id) together. A category id borrowed
+     * from a sibling project in the same organization is a valid UUID that really exists;
+     * requiring the pair to match is what makes it resolve to nothing. That is the
+     * application half of the project/category consistency invariant - the composite foreign
+     * key in V11 is the other half, and neither relies on the other being correct.
+     *
+     * [allowedRoles] gates the *category* operation, and is checked after the project has
+     * been resolved, so an organization MEMBER who cannot see the project at all still gets
+     * "not found" rather than "forbidden".
+     *
+     * @throws ProjectCategoryNotFoundException if the category does not exist or belongs to
+     *   a different project.
+     */
+    @Transactional(readOnly = true)
+    fun requireCategory(
+        organizationId: UUID,
+        projectId: UUID,
+        categoryId: UUID,
+        vararg allowedRoles: OrganizationRole,
+    ): ProjectCategoryContext {
+        val project = require(organizationId, projectId, *allowedRoles)
+
+        val category = projectCategoryRepository.findByIdAndProjectId(categoryId, project.projectId)
+            ?: throw ProjectCategoryNotFoundException()
+
+        return ProjectCategoryContext(project, category)
     }
 
     /**

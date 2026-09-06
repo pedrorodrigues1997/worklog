@@ -1,7 +1,6 @@
 package com.tictac.io.timetracking
 
 import jakarta.validation.constraints.NotNull
-import jakarta.validation.constraints.Size
 import java.time.Instant
 import java.util.UUID
 
@@ -14,12 +13,22 @@ import java.util.UUID
  * accepted interchangeably. A local time with no offset is rejected: "10:30" is not a moment
  * until someone says where, and guessing on the client's behalf is how a timesheet ends up
  * four hours out.
+ *
+ * **Where the validation lives, and why the statuses differ.** Ids are `@NotNull` and a
+ * missing one is a malformed request - 400, from Bean Validation, consistent with the rest
+ * of the API. Titles, descriptions and time ranges are checked in the service instead and
+ * fail with 422: those are well-formed requests carrying values the domain will not accept,
+ * and the distinction is worth keeping because "you forgot a field" and "that title is only
+ * spaces" are different problems for a client to handle.
  */
 data class StartTimerRequest(
     @field:NotNull(message = "Project id is required")
     val projectId: UUID?,
 
-    @field:Size(max = TimeEntry.MAX_DESCRIPTION_LENGTH, message = "Description must be at most 2000 characters")
+    /** Optional. When set it must belong to [projectId] and be active. */
+    val projectCategoryId: UUID? = null,
+
+    val title: String? = null,
     val description: String? = null,
 
     /**
@@ -40,7 +49,9 @@ data class CreateTimeEntryRequest(
     @field:NotNull(message = "Project id is required")
     val projectId: UUID?,
 
-    @field:Size(max = TimeEntry.MAX_DESCRIPTION_LENGTH, message = "Description must be at most 2000 characters")
+    val projectCategoryId: UUID? = null,
+
+    val title: String? = null,
     val description: String? = null,
 
     @field:NotNull(message = "Start time is required")
@@ -60,11 +71,19 @@ data class CreateTimeEntryRequest(
  * moving billable history across a tenant boundary or reattributing someone else's work is
  * not a request anyone can express. [endedAt] cannot be cleared either - "un-stopping" an
  * entry would resurrect a second running timer, and resuming is not an operation.
+ *
+ * [clearProjectCategory] exists because absent and null are the same thing under this
+ * convention, and removing a category needs to be sayable. An explicit flag rather than a
+ * wrapper type on every nullable field: it costs one boolean, reads plainly in a request
+ * body, and does not depend on how the JSON library distinguishes "absent" from "null".
  */
 data class UpdateTimeEntryRequest(
     val projectId: UUID? = null,
+    val projectCategoryId: UUID? = null,
+    /** true removes the category; [projectCategoryId] is then ignored. */
+    val clearProjectCategory: Boolean = false,
 
-    @field:Size(max = TimeEntry.MAX_DESCRIPTION_LENGTH, message = "Description must be at most 2000 characters")
+    val title: String? = null,
     val description: String? = null,
 
     val startedAt: Instant? = null,
@@ -76,13 +95,19 @@ data class UpdateTimeEntryRequest(
  * [durationSeconds] is the stored duration once the entry is stopped, and the elapsed time
  * since [startedAt] as of this response while it runs. The running value is computed per
  * request and never written back - the database does not tick.
+ *
+ * [projectCategoryId] and [projectCategoryName] are both null for time tracked straight
+ * against a project, which is an ordinary and fully supported shape.
  */
 data class TimeEntryResponse(
     val id: UUID,
     val organizationId: UUID,
     val projectId: UUID,
     val projectName: String,
+    val projectCategoryId: UUID?,
+    val projectCategoryName: String?,
     val userId: UUID,
+    val title: String,
     val description: String?,
     val startedAt: Instant,
     val endedAt: Instant?,

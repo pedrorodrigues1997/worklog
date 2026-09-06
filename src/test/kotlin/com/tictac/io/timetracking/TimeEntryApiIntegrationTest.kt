@@ -56,11 +56,15 @@ class TimeEntryApiIntegrationTest : OrganizationApiTest() {
     fun `a valid manual entry succeeds and the duration is calculated server-side`() {
         val body = postJson(
             entriesPath(),
-            """{"projectId":"$projectId","description":"Client meeting","startedAt":"$nineAm","endedAt":"$elevenAm","billable":true}""",
+            """{"projectId":"$projectId","title":"Client meeting","description":"Notes"""" +
+                ""","startedAt":"$nineAm","endedAt":"$elevenAm","billable":true}""",
             bob.accessToken,
         )
             .andExpect(status().isCreated)
-            .andExpect(jsonPath("$.description").value("Client meeting"))
+            .andExpect(jsonPath("$.title").value("Client meeting"))
+            .andExpect(jsonPath("$.description").value("Notes"))
+            .andExpect(jsonPath("$.projectCategoryId").doesNotExist())
+            .andExpect(jsonPath("$.projectCategoryName").doesNotExist())
             .andExpect(jsonPath("$.billable").value(true))
             .andExpect(jsonPath("$.running").value(false))
             .andExpect(jsonPath("$.durationSeconds").value(7200))
@@ -78,7 +82,8 @@ class TimeEntryApiIntegrationTest : OrganizationApiTest() {
     fun `a client-provided duration cannot override the calculated one`() {
         val body = postJson(
             entriesPath(),
-            """{"projectId":"$projectId","startedAt":"$nineAm","endedAt":"$elevenAm","durationSeconds":99999}""",
+            """{"projectId":"$projectId","title":"Work","startedAt":"$nineAm"""" +
+                ""","endedAt":"$elevenAm","durationSeconds":99999}""",
             bob.accessToken,
         ).andExpect(status().isCreated).andReturn().response.contentAsString
 
@@ -93,11 +98,11 @@ class TimeEntryApiIntegrationTest : OrganizationApiTest() {
         listOf(elevenAm to nineAm, nineAm to nineAm).forEach { (start, end) ->
             postJson(
                 entriesPath(),
-                """{"projectId":"$projectId","startedAt":"$start","endedAt":"$end"}""",
+                """{"projectId":"$projectId","title":"Work","startedAt":"$start","endedAt":"$end"}""",
                 bob.accessToken,
             )
-                .andExpect(status().isBadRequest)
-                .andExpect(jsonPath("$.title").value("Invalid time range"))
+                .andExpect(status().isUnprocessableEntity)
+                .andExpect(jsonPath("$.title").value("Invalid time entry"))
         }
 
         assertThat(timeEntryRepository.count()).isZero()
@@ -106,9 +111,9 @@ class TimeEntryApiIntegrationTest : OrganizationApiTest() {
     @Test
     fun `both timestamps are required for a manual entry`() {
         listOf(
-            """{"projectId":"$projectId"}""",
-            """{"projectId":"$projectId","startedAt":"$nineAm"}""",
-            """{"projectId":"$projectId","endedAt":"$elevenAm"}""",
+            """{"projectId":"$projectId","title":"Work"}""",
+            """{"projectId":"$projectId","title":"Work","startedAt":"$nineAm"}""",
+            """{"projectId":"$projectId","title":"Work","endedAt":"$elevenAm"}""",
         ).forEach { postJson(entriesPath(), it, bob.accessToken).andExpect(status().isBadRequest) }
 
         assertThat(timeEntryRepository.count()).isZero()
@@ -121,7 +126,8 @@ class TimeEntryApiIntegrationTest : OrganizationApiTest() {
         val utc = createTimeEntry(organizationId, projectId, bob, nineAm, elevenAm)
         val offset = postJson(
             entriesPath(),
-            """{"projectId":"$projectId","startedAt":"2026-09-01T13:00:00+04:00","endedAt":"2026-09-01T15:00:00+04:00"}""",
+            """{"projectId":"$projectId","title":"Work","startedAt":"2026-09-01T13:00:00+04:00"""" +
+                ""","endedAt":"2026-09-01T15:00:00+04:00"}""",
             bob.accessToken,
         ).andExpect(status().isCreated).andReturn().response.contentAsString
 
@@ -136,7 +142,8 @@ class TimeEntryApiIntegrationTest : OrganizationApiTest() {
         // ends up hours out.
         postJson(
             entriesPath(),
-            """{"projectId":"$projectId","startedAt":"2026-09-01T09:00:00","endedAt":"2026-09-01T11:00:00"}""",
+            """{"projectId":"$projectId","title":"Work","startedAt":"2026-09-01T09:00:00"""" +
+                ""","endedAt":"2026-09-01T11:00:00"}""",
             bob.accessToken,
         ).andExpect(status().isBadRequest)
 
@@ -184,7 +191,7 @@ class TimeEntryApiIntegrationTest : OrganizationApiTest() {
 
         postJson(
             entriesPath(),
-            """{"projectId":"$hidden","startedAt":"$nineAm","endedAt":"$elevenAm"}""",
+            """{"projectId":"$hidden","title":"Work","startedAt":"$nineAm","endedAt":"$elevenAm"}""",
             bob.accessToken,
         ).andExpect(status().isNotFound)
 
@@ -197,7 +204,7 @@ class TimeEntryApiIntegrationTest : OrganizationApiTest() {
 
         postJson(
             entriesPath(),
-            """{"projectId":"$projectId","startedAt":"$nineAm","endedAt":"$elevenAm"}""",
+            """{"projectId":"$projectId","title":"Work","startedAt":"$nineAm","endedAt":"$elevenAm"}""",
             bob.accessToken,
         )
             .andExpect(status().isConflict)
@@ -213,8 +220,10 @@ class TimeEntryApiIntegrationTest : OrganizationApiTest() {
 
     @Test
     fun `creating requires authentication`() {
-        postJson(entriesPath(), """{"projectId":"$projectId","startedAt":"$nineAm","endedAt":"$elevenAm"}""")
-            .andExpect(status().isUnauthorized)
+        postJson(
+            entriesPath(),
+            """{"projectId":"$projectId","title":"Work","startedAt":"$nineAm","endedAt":"$elevenAm"}""",
+        ).andExpect(status().isUnauthorized)
 
         assertThat(timeEntryRepository.count()).isZero()
     }
@@ -252,7 +261,7 @@ class TimeEntryApiIntegrationTest : OrganizationApiTest() {
         val id = createTimeEntry(organizationId, projectId, bob, nineAm, elevenAm)
 
         patchJson(entryPath(id), """{"startedAt":"${elevenAm.plus(Duration.ofHours(1))}"}""", bob.accessToken)
-            .andExpect(status().isBadRequest)
+            .andExpect(status().isUnprocessableEntity)
 
         val entry = timeEntryRepository.findById(id).orElseThrow()
         assertThat(entry.startedAt).isEqualTo(nineAm)

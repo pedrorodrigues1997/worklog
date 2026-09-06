@@ -38,6 +38,11 @@ class TimerService(
      * Nothing is stopped implicitly. Starting a second timer is an error, not an instruction
      * to end the first - a client that silently closed a half-hour of someone's work because
      * a button was double-clicked would be worse than a rejected request.
+     *
+     * The project and category chosen here are fixed for the life of the timer: a running
+     * entry records the selection made when it started, and changing it mid-flight would mean
+     * the elapsed time belonged partly to one project and partly to another with nothing
+     * recording where the boundary was. To track different work, stop and start again.
      */
     @Transactional
     fun start(organizationId: UUID, request: StartTimerRequest): TimeEntryResponse {
@@ -50,14 +55,21 @@ class TimerService(
             throw TimerAlreadyRunningException()
         }
 
+        // Resolved before anything is written, and against *this* project - a category id
+        // from a sibling project resolves to nothing, and a retired one is refused.
+        val category = request.projectCategoryId
+            ?.let { timeEntryAccess.requireCategoryForNewTime(organizationId, project.projectId, it) }
+
         val now = Instant.now()
         val entry = TimeEntry(
             organizationId = organizationId,
             projectId = project.projectId,
+            projectCategoryId = category?.id,
             userId = organization.userId,
             startedAt = now,
+            title = TimeEntryValidation.title(request.title),
         ).apply {
-            description = request.description?.trim()?.takeIf { it.isNotEmpty() }
+            description = TimeEntryValidation.description(request.description)
             billable = request.billable
         }
 
@@ -84,6 +96,10 @@ class TimerService(
      * Calling it twice is a 409, not a silent success and not a corrupted row: the second
      * call finds `ended_at` already set and refuses before touching anything, so the first
      * stop's timestamp and duration stand.
+     *
+     * A timer left running longer than [TimeEntry.MAX_DURATION] stops at the cap rather than
+     * being refused - see [TimeEntry.stopAt]. Refusing would leave someone holding a timer
+     * they could never close.
      */
     @Transactional
     fun stop(organizationId: UUID, timeEntryId: UUID): TimeEntryResponse {

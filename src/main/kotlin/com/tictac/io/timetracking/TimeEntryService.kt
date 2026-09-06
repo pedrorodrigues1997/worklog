@@ -38,16 +38,21 @@ class TimeEntryService(
         val startedAt = request.startedAt!!
         val endedAt = request.endedAt!!
 
-        requireValidRange(startedAt, endedAt)
+        TimeEntryValidation.range(startedAt, endedAt)
+
+        val category = request.projectCategoryId
+            ?.let { timeEntryAccess.requireCategoryForNewTime(organizationId, project.projectId, it) }
 
         val entry = TimeEntry(
             organizationId = organizationId,
             projectId = project.projectId,
+            projectCategoryId = category?.id,
             userId = organization.userId,
             startedAt = startedAt,
+            title = TimeEntryValidation.title(request.title),
         ).apply {
             this.endedAt = endedAt
-            description = request.description?.trim()?.takeIf { it.isNotEmpty() }
+            description = TimeEntryValidation.description(request.description)
             billable = request.billable
             recalculateDuration()
         }
@@ -71,6 +76,11 @@ class TimeEntryService(
      * projects are accepted here: a correction to finished work may well belong to a project
      * nobody is on any more.
      *
+     * A retired category is accepted here, unlike on a new entry: four hours recorded last
+     * quarter against a category since retired stay valid, and correcting the title of that
+     * entry must not force the category to be resurrected or dropped. Set
+     * `clearProjectCategory` to remove one - absent and null both mean "leave it alone".
+     *
      * Any change to either timestamp recalculates the duration. A client cannot supply one.
      */
     @Transactional
@@ -78,17 +88,35 @@ class TimeEntryService(
         val context = timeEntryAccess.requireEntry(organizationId, timeEntryId)
         val entry = context.timeEntry
 
+        // Project first: the category is resolved against whichever project the entry ends
+        // up on, so a request moving both at once is checked as the pair it is.
         request.projectId?.let {
             entry.projectId = timeEntryAccess.requireProjectForHistoricalTime(organizationId, it).projectId
         }
-        request.description?.let { entry.description = it.trim().takeIf { trimmed -> trimmed.isNotEmpty() } }
+
+        when {
+            request.clearProjectCategory -> entry.projectCategoryId = null
+
+            request.projectCategoryId != null ->
+                entry.projectCategoryId = timeEntryAccess
+                    .requireCategoryForHistoricalTime(organizationId, entry.projectId, request.projectCategoryId)
+                    .id
+
+            // Neither given, but the project moved: the old category cannot follow it, so it
+            // goes. The composite foreign key would refuse the write anyway; clearing it here
+            // makes that a defined outcome rather than a 500.
+            request.projectId != null -> entry.projectCategoryId = null
+        }
+
+        request.title?.let { entry.title = TimeEntryValidation.title(it) }
+        request.description?.let { entry.description = TimeEntryValidation.description(it) }
         request.billable?.let { entry.billable = it }
         request.startedAt?.let { entry.startedAt = it }
         request.endedAt?.let { entry.endedAt = it }
 
         // Validated against the state after the patch, not the request, so changing one end
-        // of an existing interval cannot quietly invert it.
-        entry.endedAt?.let { requireValidRange(entry.startedAt, it) }
+        // of an existing interval cannot quietly invert it or stretch it past the cap.
+        entry.endedAt?.let { TimeEntryValidation.range(entry.startedAt, it) }
         entry.recalculateDuration()
 
         return timeEntryResponses.of(entry, Instant.now())
@@ -140,6 +168,7 @@ class TimeEntryService(
         page: Int,
         size: Int,
         projectId: UUID? = null,
+        projectCategoryId: UUID? = null,
         userId: UUID? = null,
         from: Instant? = null,
         to: Instant? = null,
@@ -160,6 +189,7 @@ class TimeEntryService(
                 organizationId = organizationId,
                 scopedUserId = scopedUserId,
                 projectId = projectId,
+                projectCategoryId = projectCategoryId,
                 userId = userId,
                 from = from,
                 to = to,
@@ -177,9 +207,4 @@ class TimeEntryService(
         )
     }
 
-    private fun requireValidRange(startedAt: Instant, endedAt: Instant) {
-        if (!endedAt.isAfter(startedAt)) {
-            throw InvalidTimeRangeException("End time must be after start time")
-        }
-    }
 }

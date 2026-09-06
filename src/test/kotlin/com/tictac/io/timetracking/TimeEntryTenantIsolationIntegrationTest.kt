@@ -111,13 +111,13 @@ class TimeEntryTenantIsolationIntegrationTest : OrganizationApiTest() {
         // organization the caller genuinely administers, and the two do not belong together.
         postJson(
             "/api/organizations/$organizationA/time-entries",
-            """{"projectId":"$projectB","startedAt":"$nineAm","endedAt":"$elevenAm"}""",
+            """{"projectId":"$projectB","title":"Work","startedAt":"$nineAm","endedAt":"$elevenAm"}""",
             userA.accessToken,
         ).andExpect(status().isNotFound)
 
         postJson(
             "/api/organizations/$organizationA/time-entries/timer",
-            """{"projectId":"$projectB"}""",
+            """{"projectId":"$projectB","title":"Work"}""",
             userA.accessToken,
         ).andExpect(status().isNotFound)
 

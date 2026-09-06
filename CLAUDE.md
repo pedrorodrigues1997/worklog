@@ -59,6 +59,7 @@ com.tictac.io
 │   └── Organization*Service.kt     creation, settings, membership management
 ├── project/
 │   ├── Project*.kt                 entity, repository, DTOs, controllers
+│   ├── ProjectCategory*.kt         kinds of work within one project
 │   ├── ProjectAccess.kt            project-scoped gate, layered on OrganizationAccess
 │   └── Project*Service.kt          creation, settings, assignment
 ├── timetracking/
@@ -93,7 +94,8 @@ anything, and startup fails if a mapping and a migration have drifted apart.
 | `organization_members` | `(organization_id, user_id)` unique, `role`; one OWNER per org via a partial unique index |
 | `projects` | `project_id`, `organization_id`, `project_name`, `description`, `is_active` (archive flag, not a soft delete), `created_at`, `updated_at` |
 | `project_members` | `(project_id, user_id)` unique - assignment of an organisation member to a project. No role, no organisation id |
-| `time_entries` | `time_entry_id`, `organization_id`, `project_id`, `user_id`, `started_at`, nullable `ended_at`/`duration_seconds`, `billable`, `deleted_at`. One running timer per user per org via a partial unique index; all three FKs RESTRICT |
+| `project_categories` | `project_category_id`, `project_id`, `created_by_user_id`, `name`, `description`, `is_active`. Unique on `(project_id, lower(name))`. No organisation id - inherited through the project |
+| `time_entries` | `time_entry_id`, `organization_id`, `project_id`, nullable `project_category_id`, `user_id`, required `title`, `started_at`, nullable `ended_at`/`duration_seconds`, `billable`, `deleted_at`. One running timer per user per org via a partial unique index; all three parent FKs RESTRICT; a composite FK ties category to project |
 
 Designed but **not yet implemented**: `subscriptions`. The agreed DBML for it lives in the
 product brief; treat it as the source of truth and do not redesign it. The organization
@@ -226,7 +228,8 @@ them fail, the change is wrong, not the test.
     `projects.organization_id` - so it is enforced in `OrganizationMembershipService`.
     Account *closure* deliberately does not cascade: it does not break the invariant.
 22. **Projects are archived, never deleted** (`is_active`). Time entries point at them, and an
-    archived project still has to render every historical entry that references it.
+    archived project still has to render every historical entry that references it. Project
+    *categories* work the same way: `is_active`, and no DELETE endpoint either.
 23. **Time entries survive every membership change around them.** No foreign key runs from
     `time_entries` to a link table, so no cascade can reach one; and its own three FKs
     RESTRICT rather than cascade, so a hard delete of an organisation, project or user fails
@@ -248,6 +251,25 @@ them fail, the change is wrong, not the test.
     ADMIN may track against any active project in their organisation without being assigned
     to it; a MEMBER only against projects they are assigned to. Do not make administrator
     behaviour depend on `project_members`.
+
+29. **A time entry's category must belong to that entry's project**, enforced twice. The
+    application resolves a category by `(category id, project id)` together; the database has
+    a composite FK from `time_entries (project_category_id, project_id)` onto
+    `project_categories (project_category_id, project_id)`. `MATCH SIMPLE` skips it when the
+    category is null, so "no category" stays free and "another project's category" is
+    unwritable. Moving an entry between projects therefore drops its category unless a new
+    one comes with it.
+30. **Category names are unique per project, case-insensitively**, via a functional unique
+    index on `(project_id, lower(name))`. Archived categories still hold their name.
+31. **A time entry's title is required; its category and description are not.** Title is
+    trimmed then bounded 1-255, description bounded 5000, and both are validated in the
+    service rather than by Bean Validation - that is what lets them answer 422 while a
+    missing `projectId` still answers 400. A project with zero categories is valid, and
+    tracking straight against a project must keep working.
+32. **No entry spans more than `TimeEntry.MAX_DURATION` (24h).** Manual entries and edits are
+    refused past it; a running timer is *clamped* on stop instead, because refusing would
+    leave someone holding a timer they could never close. Displayed elapsed time is clamped
+    to match.
 
 ### OAuth flow, in one picture
 
@@ -289,13 +311,13 @@ must be the `jdbc:postgresql://…` form.
 docker compose up -d                 # PostgreSQL 17 on :5432
 set -a; source .env; set +a
 ./mvnw spring-boot:run
-./mvnw clean verify                  # 433 tests; Docker must be running
+./mvnw clean verify                  # 514 tests; Docker must be running
 ```
 
 - **Real PostgreSQL via Testcontainers.** No in-memory substitute — it would not catch a
   mismatch between a migration and a mapping.
 - `PostgresIntegrationTest` is the base: `@SpringBootTest` + MockMvc + container, and a
-  `@BeforeEach` that clears all nine tables children-first. `AuthenticatedApiTest` extends it
+  `@BeforeEach` that clears all ten tables children-first. `AuthenticatedApiTest` extends it
   with register/login helpers that go through the **real** endpoints and filter chain.
 - All base-derived tests share one Spring context (and one container). A test that overrides
   properties gets its own context and its own container — currently
@@ -368,6 +390,10 @@ invitations, leaving an organisation or a project voluntarily, per-project roles
 permission model finer than the three organisation roles, and anything that aggregates time
 entries - reporting, timesheets, approvals, invoicing.
 
+**This is a time-tracking product, not a task manager.** The vocabulary is Project, Project
+Category, Time Entry, Timer. Do not introduce tasks, subtasks, assignment, status, due dates,
+priorities or dependencies - a category is a *kind of work*, not a unit of work.
+
 Known open items in what *is* built:
 
 - No "link a provider from settings", no unlink, no list of linked identities. An
@@ -413,6 +439,13 @@ Known open items in what *is* built:
   and only its owner can stop it. Decide the product answer (auto-stop? flag it? let an admin
   end it?) before the frontend makes it visible.
 - Time entries have no upper bound on `started_at`, so an entry can be dated in the future.
+- The 24h cap clamps a forgotten timer rather than refusing it, which writes an end time
+  nobody was present for. Defensible, but confirm it is the product answer before the
+  frontend surfaces it.
+- Categories cannot be moved between projects, deliberately. If that is ever needed it wants
+  its own operation, the way ownership transfer does.
+- A category's name is read live into time-entry responses, so renaming it renames it across
+  all history - same trade-off as project names, same place to revisit for invoicing.
 - The project *name* in a time-entry response is read live, so a renamed project renames
   itself across all history. Correct for a UI, and a decision to revisit if invoices ever
   need the name as it was at the time.

@@ -191,7 +191,7 @@ class TimerConcurrencyIntegrationTest : OrganizationApiTest() {
         Callable {
             barrier.await(20, TimeUnit.SECONDS)
             actingAs(bob) {
-                timerService.start(organization, StartTimerRequest(projectId = projectId)).id
+                timerService.start(organization, StartTimerRequest(projectId = projectId, title = "Work")).id
             }
         }
 

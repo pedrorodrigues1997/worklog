@@ -52,6 +52,7 @@ object TimeEntryFilters {
         organizationId: UUID,
         scopedUserId: UUID?,
         projectId: UUID? = null,
+        projectCategoryId: UUID? = null,
         userId: UUID? = null,
         from: Instant? = null,
         to: Instant? = null,
@@ -67,6 +68,10 @@ object TimeEntryFilters {
             scopedUserId?.let { predicates += builder.equal(root.get<UUID>("userId"), it) }
             userId?.let { predicates += builder.equal(root.get<UUID>("userId"), it) }
             projectId?.let { predicates += builder.equal(root.get<UUID>("projectId"), it) }
+
+            // Safe to apply on its own: the organization predicate above is unconditional, so
+            // a category id from another tenant matches nothing rather than reaching across.
+            projectCategoryId?.let { predicates += builder.equal(root.get<UUID>("projectCategoryId"), it) }
             billable?.let { predicates += builder.equal(root.get<Boolean>("billable"), it) }
 
             // Ranged on started_at, which is the column every index trails on. Inclusive

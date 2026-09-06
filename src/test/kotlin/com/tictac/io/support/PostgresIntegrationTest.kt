@@ -5,6 +5,7 @@ import com.tictac.io.authentication.oauth.UserIdentityRepository
 import com.tictac.io.authentication.token.RefreshTokenRepository
 import com.tictac.io.organization.OrganizationMemberRepository
 import com.tictac.io.organization.OrganizationRepository
+import com.tictac.io.project.ProjectCategoryRepository
 import com.tictac.io.project.ProjectMemberRepository
 import com.tictac.io.project.ProjectRepository
 import com.tictac.io.timetracking.TimeEntryRepository
@@ -56,6 +57,9 @@ abstract class PostgresIntegrationTest {
     protected lateinit var projectMemberRepository: ProjectMemberRepository
 
     @Autowired
+    protected lateinit var projectCategoryRepository: ProjectCategoryRepository
+
+    @Autowired
     protected lateinit var timeEntryRepository: TimeEntryRepository
 
     /** Tests commit, so state has to be cleared explicitly between them. Children first. */
@@ -65,6 +69,7 @@ abstract class PostgresIntegrationTest {
         userIdentityRepository.deleteAll()
         refreshTokenRepository.deleteAll()
         timeEntryRepository.deleteAll()
+        projectCategoryRepository.deleteAll()
         projectMemberRepository.deleteAll()
         projectRepository.deleteAll()
         organizationMemberRepository.deleteAll()
