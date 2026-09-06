@@ -95,6 +95,10 @@ Testcontainers rather than substituting an in-memory database.
 | `JWT_CLOCK_SKEW`        | `5s`                                 | Tolerance on `exp`/`nbf`. |
 | `REFRESH_TOKEN_CLEANUP_CRON` | `0 0 3 * * *`                   | When expired refresh tokens are deleted. |
 | `INVITATION_TTL`        | `7d`                                 | How long an organization invitation stays usable. |
+| `STRIPE_SECRET_KEY`     | *(empty)*                            | Enables billing. Blank = billing off, application still runs. |
+| `STRIPE_WEBHOOK_SECRET` | *(empty)*                            | Required once a key is set: every webhook signature is checked against it. |
+| `STRIPE_PRICE_PRO`      | *(empty)*                            | Stripe price id for the PRO plan. |
+| `STRIPE_SUCCESS_URL` / `STRIPE_CANCEL_URL` / `STRIPE_PORTAL_RETURN_URL` | `http://localhost:3000/billing…` | Where Stripe returns the browser. Never taken from a request. |
 | `RATE_LIMIT_ENABLED`    | `true`                               | Throttling of `/api/auth`. |
 | `RATE_LIMIT_CAPACITY`   | `20`                                 | Requests per window per client. |
 | `RATE_LIMIT_WINDOW`     | `1m`                                 | The window. |
@@ -1197,6 +1201,120 @@ CREATE UNIQUE INDEX ux_time_entries_running_per_user_organization
 The losing insert violates it, and the violation is translated back into the same `409` the
 pre-check would have produced. The pre-check is the manners; the index is the guarantee.
 
+## Billing
+
+The organization is the customer. One organization, one Stripe customer, one subscription.
+Users never own subscriptions.
+
+```
+TicTac OWNER ──▶ POST /billing/checkout ──▶ Stripe Checkout ──▶ payment
+                                                                   │
+   subscription state ◀── update ◀── resolve org ◀── idempotency ◀──┤
+            │                                            ▲         │
+            │                                    verify signature ◀┘
+            ▼                                       (webhook)
+   GET /subscription
+```
+
+**Stripe is the source of payment truth.** Creating a checkout session activates nothing —
+it means a payment form has been prepared. The subscription becomes real only when Stripe
+says so over a signed webhook, so a user who closes the browser and never returns still ends
+up subscribed, and a user who reaches the success page without paying does not.
+
+| Method | Path | Who |
+| ------ | ---- | --- |
+| `POST` | `/api/organizations/{orgId}/billing/checkout` | `OWNER` |
+| `POST` | `/api/organizations/{orgId}/billing/portal` | `OWNER` |
+| `GET`  | `/api/organizations/{orgId}/subscription` | any member |
+| `POST` | `/api/webhooks/stripe` | Stripe, by signature |
+
+Billing is **optional**: with no `STRIPE_SECRET_KEY` the application boots normally, every
+other feature works, and billing endpoints answer `503`. Reading a subscription still works —
+an organization that has never subscribed is `FREE`, which is a state rather than a 404.
+
+```bash
+curl -X POST http://localhost:8080/api/organizations/$ORG_ID/billing/checkout \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"plan":"PRO","seatQuantity":5}'
+# {"sessionId":"cs_...","url":"https://checkout.stripe.com/..."}
+```
+
+### Plans
+
+The API speaks in plans; Stripe price ids live only in configuration
+(`billing.stripe.prices.PRO`), so a price can be replaced in Stripe without touching code and
+a client can never name a cheaper one. Adding a plan is an enum constant and a config entry.
+`FREE` deliberately has no price — there is nothing to check out.
+
+### The Stripe customer
+
+Created once per organization, on first checkout, and stored in `billing_customers` — shaped
+like `user_identities`, which solves the same problem one level down. It is reused for
+checkout, the portal, and later invoices and payment methods; minting one per attempt would
+scatter a company's billing history across duplicate customers. No card data is ever stored
+here; Stripe holds all of it.
+
+### The webhook
+
+Public, because Stripe holds no access token. Its entire authentication is the HMAC-SHA256
+signature over the **raw** request body, checked before anything reads the payload — which is
+why the endpoint takes the body as a string rather than a parsed object. Stripe's timestamp
+tolerance also makes a captured request unusable later.
+
+Rejected: missing signature, wrong secret, edited body, stale timestamp (all `400`), and a
+validly signed body that is not a usable event (`400`, distinct — only the secret holder can
+produce one, so it is a bug rather than a forgery).
+
+**Idempotency.** Stripe delivers at least once. The event id is inserted into
+`billing_webhook_events` **in the same transaction** as the state change it authorises, so a
+retry violates a unique index and the whole thing rolls back having changed nothing. A
+redelivered *older* event therefore cannot roll newer state back.
+
+**Organization resolution.** Always `subscription.customer` →
+`billing_customers.provider_customer_id` → organization. Metadata carries the organization id
+for a human reading the Stripe dashboard and is **never** an authorisation input — it is
+editable by anyone with dashboard access, so trusting it would let them move a subscription
+between tenants.
+
+Handled: `customer.subscription.created`, `.updated`, `.deleted`. Not
+`checkout.session.completed` — this backend created the customer before the session, so the
+mapping already exists, and the subscription events carry the authoritative state.
+
+**Failures are shaped for Stripe.** Applied and deliberately-ignored both answer `200` so
+Stripe stops retrying; only a genuine failure answers non-2xx and asks it to try again. An
+unknown Stripe status or an unconfigured price fails loudly rather than guessing — guessing
+would either hand out paid features or cut off a paying customer, silently.
+
+### Status mapping
+
+| Stripe | TicTac | Entitled |
+| --- | --- | --- |
+| `trialing` | `TRIALING` | yes |
+| `active` | `ACTIVE` | yes |
+| `past_due` | `PAST_DUE` | **yes** — Stripe is still retrying the card |
+| `unpaid` | `UNPAID` | no — Stripe has given up |
+| `paused` | `PAUSED` | no |
+| `incomplete` | `INCOMPLETE` | no |
+| `incomplete_expired` | `INCOMPLETE_EXPIRED` | no |
+| `canceled` | `CANCELED` | no |
+
+One-to-one, deliberately: Stripe owns the transitions, so a coarser local model would only be
+somewhere for the two to disagree. `active` is exposed pre-computed so clients need not
+reimplement which statuses count.
+
+### Cancellation
+
+Stripe has two shapes and they are stored separately:
+
+- **cancel at period end** — status stays `ACTIVE`, `cancelAtPeriodEnd` is true, `cancelledAt`
+  records when cancellation was *requested*, and the organization stays entitled until
+  `currentPeriodEnd`;
+- **cancelled** — status becomes `CANCELED` and entitlement ends.
+
+`cancelledAt` is the request time, not the end of access — reading it as "access has ended"
+is the mistake the extra flag exists to prevent. The subscription row is **never deleted**;
+cancellation is a state, and the record survives it.
+
 ## Layout
 
 Code is organised by business domain, not by technical layer:
@@ -1210,6 +1328,7 @@ com.tictac.io
 ├── organization/    organizations, memberships, roles, invitations, tenant-scoped authorization
 ├── project/         projects, categories, assignments, project-scoped authorization
 ├── timetracking/    time entries, the timer, entry-scoped authorization
+├── billing/         subscriptions, Stripe customers, checkout, webhooks
 └── authentication/  registration, login, refresh, logout, HTTP security
     ├── token/       JWT issuing/decoding, refresh-token state and cleanup
     └── oauth/       Google registration, identity linking, sign-in handoff

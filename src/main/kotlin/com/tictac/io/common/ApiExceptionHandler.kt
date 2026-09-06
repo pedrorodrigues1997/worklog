@@ -7,6 +7,12 @@ import com.tictac.io.authentication.oauth.InvalidOAuthIdentityException
 import com.tictac.io.authentication.oauth.OAuthLinkingNotAllowedException
 import com.tictac.io.authentication.token.InvalidRefreshTokenException
 import com.tictac.io.organization.InvalidOwnershipTransferException
+import com.tictac.io.billing.BillingNotConfiguredException
+import com.tictac.io.billing.InvalidWebhookPayloadException
+import com.tictac.io.billing.InvalidWebhookSignatureException
+import com.tictac.io.billing.PlanNotPurchasableException
+import com.tictac.io.billing.StripeUnavailableException
+import com.tictac.io.billing.UnmappableStripeStateException
 import com.tictac.io.organization.AlreadyOrganizationMemberException
 import com.tictac.io.organization.InvitationAlreadyPendingException
 import com.tictac.io.organization.InvitationEmailMismatchException
@@ -247,6 +253,70 @@ class ApiExceptionHandler : ResponseEntityExceptionHandler() {
     fun handleProjectCategoryValidation(ex: ProjectCategoryValidationException): ProblemDetail =
         ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_ENTITY, ex.message).apply {
             title = "Invalid project category"
+        }
+
+    /**
+     * A webhook whose signature is missing or does not verify.
+     *
+     * 400, and deliberately terse: the response says nothing about which check failed, and
+     * nothing is logged that would echo the payload back. Anyone can POST to this endpoint;
+     * only Stripe can sign for it.
+     */
+    @ExceptionHandler(InvalidWebhookSignatureException::class)
+    fun handleInvalidWebhookSignature(ex: InvalidWebhookSignatureException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "Webhook signature verification failed").apply {
+            title = "Invalid webhook signature"
+        }
+
+    /**
+     * A webhook that verified but carried an unusable body. 400, and separate from a
+     * signature failure: only the holder of the signing secret can produce this, so it
+     * reads as a malformed request rather than a forged one.
+     */
+    @ExceptionHandler(InvalidWebhookPayloadException::class)
+    fun handleInvalidWebhookPayload(ex: InvalidWebhookPayloadException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.message).apply {
+            title = "Malformed webhook payload"
+        }
+
+    /**
+     * Stripe described a status or a price this deployment cannot map.
+     *
+     * 500 on purpose. It makes the webhook non-2xx, so Stripe retries and shows the failure
+     * in its dashboard - which is the only honest response to billing input we do not
+     * understand. Guessing would either hand out paid features or cut off a paying customer.
+     */
+    @ExceptionHandler(UnmappableStripeStateException::class)
+    fun handleUnmappableStripeState(ex: UnmappableStripeStateException): ProblemDetail {
+        log.error("Unmappable Stripe state: {}", ex.message)
+        return ProblemDetail.forStatusAndDetail(
+            HttpStatus.INTERNAL_SERVER_ERROR,
+            "Billing state could not be processed",
+        ).apply { title = "Unprocessable billing state" }
+    }
+
+    /** Billing is not configured in this deployment - a normal state locally. */
+    @ExceptionHandler(BillingNotConfiguredException::class)
+    fun handleBillingNotConfigured(ex: BillingNotConfiguredException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, ex.message).apply {
+            title = "Billing not configured"
+        }
+
+    /**
+     * Stripe refused or could not be reached. 502: the failure is upstream, and the detail
+     * stays generic because Stripe's messages name customers, prices and internal ids.
+     */
+    @ExceptionHandler(StripeUnavailableException::class)
+    fun handleStripeUnavailable(ex: StripeUnavailableException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.BAD_GATEWAY, "The billing provider is unavailable").apply {
+            title = "Billing provider error"
+        }
+
+    /** A plan with no price configured cannot be checked out. */
+    @ExceptionHandler(PlanNotPurchasableException::class)
+    fun handlePlanNotPurchasable(ex: PlanNotPurchasableException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_ENTITY, ex.message).apply {
+            title = "Plan is not purchasable"
         }
 
     /**

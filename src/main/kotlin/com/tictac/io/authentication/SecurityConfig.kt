@@ -94,6 +94,17 @@ class SecurityConfig {
         const val INVITATION_REGISTER_PATH = "/api/invitations/register"
 
         /**
+         * Stripe's server-to-server callback. Public because Stripe holds no access token
+         * and never will; it is authenticated by an HMAC signature over the raw request
+         * body instead, checked before the payload is looked at. See StripeGateway.
+         *
+         * It belongs on this chain rather than the default-deny one for the same reason
+         * logout does: a request arriving with no Authorization header at all must reach
+         * the handler, not be rejected during authentication.
+         */
+        const val STRIPE_WEBHOOK_PATH = "/api/webhooks/stripe"
+
+        /**
          * All of these are authenticated by something other than an access token:
          * credentials for login, a refresh token for refresh and logout, a single-use code
          * for the OAuth exchange, nothing at all for register.
@@ -106,6 +117,7 @@ class SecurityConfig {
                 LOGOUT_PATH,
                 OAUTH_EXCHANGE_PATH,
                 INVITATION_REGISTER_PATH,
+                STRIPE_WEBHOOK_PATH,
             )
     }
 }

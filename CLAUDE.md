@@ -70,6 +70,11 @@ com.tictac.io
 │   ├── TimeEntryAccess.kt          entry-scoped gate, on top of Project/OrganizationAccess
 │   ├── TimerService.kt             start / stop / current
 │   └── TimeEntryService.kt         manual entries, editing, listing, soft delete
+├── billing/
+│   ├── Subscription.kt             a cache of Stripe's state, never the source of truth
+│   ├── BillingCustomer.kt          organization ↔ Stripe customer, + webhook event log
+│   ├── StripeGateway.kt            the only code that talks to Stripe
+│   └── StripeWebhookService.kt     signature-verified state updates, idempotent
 └── authentication/
     ├── SecurityConfig.kt           two filter chains (public POSTs, default-deny)
     ├── PasswordEncoderConfig.kt
@@ -93,6 +98,9 @@ anything, and startup fails if a mapping and a migration have drifted apart.
 | `refresh_tokens` | server-side refresh state: `token_hash`, `expires_at`, `revoked_at`, `replaced_by_id` |
 | `user_identities` | `(user_id, provider, provider_user_id)` — external logins |
 | `oauth_login_codes` | single-use codes handing an OAuth sign-in to the frontend |
+| `billing_customers` | `(organization_id, provider)` and `(provider, provider_customer_id)` both unique - the only mapping from a Stripe event back to an organisation |
+| `subscriptions` | one per organisation (unique `organization_id`), `plan`, `status`, `seat_quantity`, `provider_subscription_id`, `cancel_at_period_end`. A cache of Stripe |
+| `billing_webhook_events` | `(provider, event_id)` unique - the idempotency guarantee |
 | `organization_invitations` | `id`, `organization_id`, `email`, `invited_by_user_id`, `token_hash`, `expires_at`, `accepted_at`. State is the timestamps - no status column. Partial unique index on `(organization_id, email) WHERE accepted_at IS NULL` |
 | `organizations` | `organization_id`, `organization_name`, `created_at`, `deleted_at` (soft delete) |
 | `organization_members` | `(organization_id, user_id)` unique, `role`; one OWNER per org via a partial unique index |
@@ -295,6 +303,28 @@ them fail, the change is wrong, not the test.
     The public POST chain ignores the Authorization header on purpose (invariant 2's chain),
     so acceptance-as-an-existing-user cannot live there. Do not "simplify" these into one
     public endpoint.
+39. **Stripe is the source of payment truth.** Creating a checkout session activates nothing;
+    `subscriptions` is written only from a signature-verified webhook. Never mark a
+    subscription active because a client said checkout succeeded.
+40. **The webhook's whole authentication is the HMAC over the raw body.** Take the payload as
+    a `String` - parsing and re-serialising changes the bytes and every signature fails. The
+    endpoint is on the public POST chain for the same reason logout is.
+41. **Webhook idempotency is the event id inserted in the same transaction as the state
+    change** (`billing_webhook_events`, unique on `(provider, event_id)`). Stripe delivers at
+    least once; a retry must roll back having changed nothing, including an *older* event
+    redelivered after a newer one.
+42. **An organisation is resolved from the Stripe customer id, never from event metadata.**
+    Metadata is editable by anyone with Stripe dashboard access. `billing_customers` is the
+    mapping, and it was written when this backend created the customer.
+43. **Unmappable Stripe input fails loudly** - an unknown status or an unconfigured price
+    throws, the webhook answers non-2xx, and Stripe surfaces it. Guessing would either hand
+    out paid features or cut a paying customer off, silently. An unknown *customer* is
+    different: recorded and ignored with a 200, since it is not ours to act on.
+44. **`cancel_at_period_end` is stored separately from `cancelled_at`.** Stripe keeps a
+    cancelling subscription `active` until the period ends; `cancelled_at` is when
+    cancellation was *requested*, not when access stops. Subscription rows are never deleted.
+45. **No Stripe identifier or secret is ever in a response.** Price ids live in configuration
+    only; the subscription API exposes plan, status, seats and dates.
 
 ### OAuth flow, in one picture
 
@@ -336,13 +366,13 @@ must be the `jdbc:postgresql://…` form.
 docker compose up -d                 # PostgreSQL 17 on :5432
 set -a; source .env; set +a
 ./mvnw spring-boot:run
-./mvnw clean verify                  # 567 tests; Docker must be running
+./mvnw clean verify                  # 605 tests; Docker must be running
 ```
 
 - **Real PostgreSQL via Testcontainers.** No in-memory substitute — it would not catch a
   mismatch between a migration and a mapping.
 - `PostgresIntegrationTest` is the base: `@SpringBootTest` + MockMvc + container, and a
-  `@BeforeEach` that clears all eleven tables children-first. `AuthenticatedApiTest` extends it
+  `@BeforeEach` that clears all fourteen tables children-first. `AuthenticatedApiTest` extends it
   with register/login helpers that go through the **real** endpoints and filter chain.
 - All base-derived tests share one Spring context (and one container). A test that overrides
   properties gets its own context and its own container — currently
@@ -356,6 +386,11 @@ set -a; source .env; set +a
 - `OrganizationApiTest` extends `AuthenticatedApiTest` with organisation helpers and adds no
   bean overrides, so the organisation tests stay in the shared context.
 - **Never mock away Spring Security** for authentication tests.
+- **Never mock away Stripe webhook signature verification.** `StripeWebhookIntegrationTest`
+  signs payloads the way Stripe does and runs the real check; that endpoint is public and
+  writes billing state, so a stubbed verification would test nothing that matters. Only
+  `StripeGateway` - the one component that makes a network call - is replaced, and only in
+  the checkout/portal tests.
 - The external provider is stubbed at the `OidcUser` / `OAuth2AuthenticationToken` boundary —
   i.e. from verified claims onward. Nothing contacts Google.
 - Test config is `src/test/resources/application-test.properties` + `@ActiveProfiles("test")`,
@@ -405,8 +440,13 @@ Spring Boot 4 / Kotlin specifics, all discovered the hard way:
 
 Do not add these speculatively; each is its own task.
 
-Subscriptions · Stripe · seats and licensing · clients · tasks · reports · CSV export ·
-email sending (Resend) · **CORS** · frontend code of any kind.
+Clients · tasks · reports · CSV export · email sending (Resend) · **CORS** · frontend code of
+any kind.
+
+Billing exists (invariants 39-45), but **seat enforcement does not**: `seat_quantity` is what
+was purchased, and nothing compares it to the member count or blocks anything. Entitlement is
+computed (`SubscriptionStatus.grantsAccess`) and never enforced. Both are deliberate - they
+are pricing decisions, not code decisions.
 
 Organisations, memberships and organisation roles now exist (see the invariants in §5).
 Ownership transfer and account closure exist too (invariants 15-17), projects and project
@@ -445,6 +485,14 @@ Known open items in what *is* built:
   endpoint. That must stop being returned the moment a mail provider is wired up.
 - An invitation only ever grants MEMBER; there is no way to invite an ADMIN directly, so a
   new administrator has to be invited and then promoted.
+- Nothing enforces seats or entitlement. An organisation on FREE has every feature, and one
+  with 5 seats can have 50 members. `grantsAccess()` is where the gate goes when there is one.
+- `billing_webhook_events` grows without bound. It only needs to outlive Stripe's retry
+  window, so it wants the same scheduled cleanup `refresh_tokens` has.
+- Downgrades, plan changes and proration are Stripe's to perform through the billing portal;
+  this backend only records the result. There is no in-app plan-change endpoint.
+- A subscription row is overwritten in place, so there is no local billing history. Stripe
+  keeps it, which is the right place for it, but reporting on it later means calling Stripe.
 - Account closure keeps non-owner membership rows, by decision (see `AccountClosureService`).
   They are inert and invisible, but an organisation's member count and its
   `organization_members` row count therefore differ. Seat counting must go through

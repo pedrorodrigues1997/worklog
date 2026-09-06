@@ -4,6 +4,9 @@ import com.tictac.io.authentication.oauth.OAuthLoginCodeRepository
 import com.tictac.io.authentication.oauth.UserIdentityRepository
 import com.tictac.io.authentication.token.RefreshTokenRepository
 import com.tictac.io.organization.OrganizationMemberRepository
+import com.tictac.io.billing.BillingCustomerRepository
+import com.tictac.io.billing.BillingWebhookEventRepository
+import com.tictac.io.billing.SubscriptionRepository
 import com.tictac.io.organization.OrganizationInvitationRepository
 import com.tictac.io.organization.OrganizationRepository
 import com.tictac.io.project.ProjectCategoryRepository
@@ -66,12 +69,24 @@ abstract class PostgresIntegrationTest {
     @Autowired
     protected lateinit var timeEntryRepository: TimeEntryRepository
 
+    @Autowired
+    protected lateinit var billingCustomerRepository: BillingCustomerRepository
+
+    @Autowired
+    protected lateinit var subscriptionRepository: SubscriptionRepository
+
+    @Autowired
+    protected lateinit var billingWebhookEventRepository: BillingWebhookEventRepository
+
     /** Tests commit, so state has to be cleared explicitly between them. Children first. */
     @BeforeEach
     fun clearDatabase() {
         oAuthLoginCodeRepository.deleteAll()
         userIdentityRepository.deleteAll()
         refreshTokenRepository.deleteAll()
+        billingWebhookEventRepository.deleteAll()
+        subscriptionRepository.deleteAll()
+        billingCustomerRepository.deleteAll()
         timeEntryRepository.deleteAll()
         projectCategoryRepository.deleteAll()
         projectMemberRepository.deleteAll()
