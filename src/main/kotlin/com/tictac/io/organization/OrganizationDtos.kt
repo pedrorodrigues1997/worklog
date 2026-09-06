@@ -41,6 +41,28 @@ data class ChangeMemberRoleRequest(
 )
 
 /**
+ * The incoming owner, identified by user id and required to be a member already.
+ *
+ * Deliberately not by email. An email would let a caller test which addresses have
+ * accounts, and it would blur the rule that ownership moves *within* an organization -
+ * bringing a new person in is an invitation, which is a different operation.
+ */
+data class TransferOwnershipRequest(
+    @field:NotNull(message = "Target user id is required")
+    val userId: UUID?,
+)
+
+/**
+ * Both sides of a completed transfer, so a client knows the whole outcome without a
+ * follow-up read - including its own new role, since the caller has just demoted itself.
+ */
+data class OwnershipTransferResponse(
+    val organizationId: UUID,
+    val previousOwner: OrganizationMemberResponse,
+    val newOwner: OrganizationMemberResponse,
+)
+
+/**
  * An organization as seen *by one caller* - [role] is the requesting user's role in it,
  * not a property of the organization. That is why there is no endpoint returning an
  * organization without a membership behind it.

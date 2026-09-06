@@ -48,12 +48,14 @@ com.tictac.io
 ├── user/
 │   ├── User.kt, UserRepository.kt
 │   ├── ActiveUser.kt               resolves the token to a live account
+│   ├── AccountClosureService.kt    DELETE /api/users/me, and the ownership guard on it
 │   ├── EmailNormalization.kt       shared by registration and login
-│   └── CurrentUserController.kt    GET /api/users/me
+│   └── CurrentUserController.kt    GET + DELETE /api/users/me
 ├── organization/
 │   ├── Organization*.kt            entity, repository, DTOs, controllers
 │   ├── OrganizationRole.kt         OWNER/ADMIN/MEMBER + the whole membership policy
 │   ├── OrganizationAccess.kt       THE tenant-scoped authorisation gate
+│   ├── OrganizationOwnershipService.kt  the only operation that moves OWNER
 │   └── Organization*Service.kt     creation, settings, membership management
 └── authentication/
     ├── SecurityConfig.kt           two filter chains (public POSTs, default-deny)
@@ -183,6 +185,18 @@ them fail, the change is wrong, not the test.
 14. **`OrganizationRole.outranks` / `canAssign` are the entire membership policy.** No role
     outranks itself or the OWNER, and OWNER is never assignable; that is what makes
     self-promotion, admin-on-admin action and an ownerless organisation all fail closed.
+15. **Ownership moves only through `OrganizationOwnershipService`.** It is the single
+    exception to invariant 14, and it demotes the outgoing owner in the same transaction as
+    it promotes the incoming one. Two role edits could not do this without passing through
+    two owners or none.
+16. **The demote is flushed before the promote.** The partial unique index permits one OWNER
+    row per organisation at any instant, so the order is load-bearing: promoting first
+    violates it on every transfer. Two `saveAndFlush` calls pin it — mutating both
+    and letting one flush sort it out leaves the order to Hibernate's action queue.
+17. **An active organisation is never owned by a closed account.** Enforced from both ends:
+    account closure refuses while the caller owns one, and ownership transfer refuses a
+    closed target. The two interlock on a `SELECT ... FOR UPDATE` of the `users` row, so they
+    cannot both read a stale answer and then both act on it.
 
 ### OAuth flow, in one picture
 
@@ -224,7 +238,7 @@ must be the `jdbc:postgresql://…` form.
 docker compose up -d                 # PostgreSQL 17 on :5432
 set -a; source .env; set +a
 ./mvnw spring-boot:run
-./mvnw clean verify                  # 218 tests; Docker must be running
+./mvnw clean verify                  # 255 tests; Docker must be running
 ```
 
 - **Real PostgreSQL via Testcontainers.** No in-memory substitute — it would not catch a
@@ -235,8 +249,12 @@ set -a; source .env; set +a
 - All base-derived tests share one Spring context (and one container). A test that overrides
   properties gets its own context and its own container — currently
   `RateLimitedAuthenticationIntegrationTest`, `OAuth2ProviderWiringIntegrationTest` and
-  `OrganizationCreationAtomicityIntegrationTest` (a `@MockitoSpyBean`). All three earn it:
-  they prove wiring or transaction behaviour that unit tests cannot.
+  `OrganizationAtomicityIntegrationTest` (a `@MockitoSpyBean`). All three earn it: they
+  prove wiring or transaction behaviour that unit tests cannot. Put any new
+  rollback test in the existing atomicity class rather than starting another spy context.
+- Concurrency is tested by calling the service from two threads, not through MockMvc: each
+  needs its own transaction, and `SecurityContextHolder` is thread-local. See
+  `OrganizationOwnershipConcurrencyIntegrationTest`.
 - `OrganizationApiTest` extends `AuthenticatedApiTest` with organisation helpers and adds no
   bean overrides, so the organisation tests stay in the shared context.
 - **Never mock away Spring Security** for authentication tests.
@@ -293,8 +311,9 @@ Subscriptions · Stripe · seats and licensing · projects · clients · tasks �
 reports · CSV export · email sending (Resend) · **CORS** · frontend code of any kind.
 
 Organisations, memberships and organisation roles now exist (see the invariants in §5).
-What is *not* built on top of them: invitations, ownership transfer, leaving an
-organisation, per-project membership, and any permission model finer than the three roles.
+Ownership transfer and account closure exist too (invariants 15-17). What is *not* built on
+top of them: invitations, leaving an organisation voluntarily, per-project membership, and
+any permission model finer than the three roles.
 
 Known open items in what *is* built:
 
@@ -313,11 +332,17 @@ Known open items in what *is* built:
 - OAuth-created users can have a blank `last_name` if Google returns no family name.
 - No invitations, so the only way into an organisation is founding one. Membership rows for
   anyone else currently have to be seeded directly (the tests do this deliberately).
-- No ownership transfer, and therefore no way to hand over or leave an organisation as its
-  owner. OWNER is unassignable and unremovable on purpose until that operation exists.
-- Deleting a user account does not touch their memberships; an organisation could in
-  principle be owned by a closed account. Closed accounts are filtered out of member
-  listings, which would make such an owner invisible. Decide this alongside account deletion.
+- Account closure keeps non-owner membership rows, by decision (see `AccountClosureService`).
+  They are inert and invisible, but an organisation's member count and its
+  `organization_members` row count therefore differ. Seat counting must go through
+  `users.deleted_at`; do not count rows.
+- No "leave organisation" for a non-owner. An admin can remove them, but they cannot walk out
+  on their own, and the only self-service exit is closing the account entirely.
+- Closure is refused, never queued. There is no grace period, no scheduled purge, and no
+  restore — a closed account is soft-deleted forever and its email stays taken.
+- A soft-deleted organisation may be owned by a closed account. Deliberate: it is unreachable
+  either way, and blocking closure on it would be a dead end since transfer refuses deleted
+  organisations too. Revisit if organisation restore is ever built.
 - Organisation soft delete leaves everything else in place, including memberships. There is
   no restore and no purge.
 - `logging` never contains passwords, hashes or tokens. Keep it that way.

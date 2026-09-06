@@ -27,6 +27,7 @@ import java.util.UUID
 @RequestMapping("/api/organizations")
 class OrganizationController(
     private val organizationService: OrganizationService,
+    private val organizationOwnershipService: OrganizationOwnershipService,
 ) {
 
     /** The caller becomes the OWNER. There is no way to create one owned by anyone else. */
@@ -53,4 +54,17 @@ class OrganizationController(
     @DeleteMapping("/{organizationId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     fun delete(@PathVariable organizationId: UUID) = organizationService.softDelete(organizationId)
+
+    /**
+     * Hands the organization to another member, demoting the caller to ADMIN. OWNER only.
+     *
+     * A POST rather than a PATCH on the member: it is a single named operation with two
+     * effects, not an edit of one member's role - and the membership API refuses to touch
+     * OWNER precisely so that this is the only route to it.
+     */
+    @PostMapping("/{organizationId}/transfer-ownership")
+    fun transferOwnership(
+        @PathVariable organizationId: UUID,
+        @Valid @RequestBody request: TransferOwnershipRequest,
+    ): OwnershipTransferResponse = organizationOwnershipService.transferOwnership(organizationId, request)
 }

@@ -1,6 +1,8 @@
 package com.tictac.io.organization
 
+import jakarta.persistence.LockModeType
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Lock
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
 import java.util.UUID
@@ -15,6 +17,27 @@ interface OrganizationMemberRepository : JpaRepository<OrganizationMember, UUID>
     fun findByOrganizationIdAndUserId(organizationId: UUID, userId: UUID): OrganizationMember?
 
     fun countByOrganizationIdAndRole(organizationId: UUID, role: OrganizationRole): Long
+
+    /**
+     * The organization's owner, with the row locked for update (`SELECT ... FOR UPDATE`).
+     *
+     * This is the serialisation point for ownership transfer. Two concurrent transfers of
+     * the same organization both reach this query; one takes the lock, the other waits.
+     * When the loser resumes, PostgreSQL re-evaluates the predicate against the row it was
+     * waiting on - which the winner has just demoted to ADMIN - so it no longer matches
+     * `role = OWNER` and the query returns nothing. The loser therefore finds no owner to
+     * demote and fails cleanly, rather than racing the winner to a second OWNER row and
+     * getting a raw constraint violation.
+     *
+     * [role] is a parameter only because a JPQL literal for an enum constant is awkward;
+     * callers pass [OrganizationRole.OWNER].
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT m FROM OrganizationMember m WHERE m.organizationId = :organizationId AND m.role = :role")
+    fun findAndLockOwner(
+        @Param("organizationId") organizationId: UUID,
+        @Param("role") role: OrganizationRole,
+    ): OrganizationMember?
 
     /**
      * The caller's organizations, with the role they hold in each.

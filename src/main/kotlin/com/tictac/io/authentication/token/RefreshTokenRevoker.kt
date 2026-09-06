@@ -23,6 +23,23 @@ class RefreshTokenRevoker(
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     fun revokeAllFor(userId: UUID, now: Instant = Instant.now()) {
+        revokeAll(userId, now)
+    }
+
+    /**
+     * The same revocation, sharing the caller's transaction.
+     *
+     * Account closure wants the opposite guarantee to reuse detection: closing an account
+     * and ending its sessions must succeed or fail together. Revoking independently would
+     * mean a closure that rolled back still signed the user out of everything, and - worse
+     * in the other direction - the account row could commit while the revocation did not.
+     */
+    @Transactional
+    fun revokeAllForInCurrentTransaction(userId: UUID, now: Instant = Instant.now()) {
+        revokeAll(userId, now)
+    }
+
+    private fun revokeAll(userId: UUID, now: Instant) {
         val active = refreshTokenRepository.findAllByUserIdAndRevokedAtIsNull(userId)
         if (active.isEmpty()) return
 

@@ -6,8 +6,11 @@ import com.tictac.io.authentication.oauth.InvalidLoginCodeException
 import com.tictac.io.authentication.oauth.InvalidOAuthIdentityException
 import com.tictac.io.authentication.oauth.OAuthLinkingNotAllowedException
 import com.tictac.io.authentication.token.InvalidRefreshTokenException
+import com.tictac.io.organization.InvalidOwnershipTransferException
 import com.tictac.io.organization.OrganizationMemberNotFoundException
 import com.tictac.io.organization.OrganizationNotFoundException
+import com.tictac.io.organization.OwnershipTransferConflictException
+import com.tictac.io.user.AccountClosureBlockedException
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
@@ -115,6 +118,39 @@ class ApiExceptionHandler : ResponseEntityExceptionHandler() {
     fun handleOrganizationMemberNotFound(ex: OrganizationMemberNotFoundException): ProblemDetail =
         ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.message).apply {
             title = "Member not found"
+        }
+
+    /**
+     * A transfer request that is not a transfer - today, only handing the organization to
+     * yourself. A validation failure rather than a conflict: nothing about the state of
+     * the organization would make it valid.
+     */
+    @ExceptionHandler(InvalidOwnershipTransferException::class)
+    fun handleInvalidOwnershipTransfer(ex: InvalidOwnershipTransferException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.message).apply {
+            title = "Invalid ownership transfer"
+        }
+
+    /**
+     * A well-formed transfer the organization's current state will not accept - a closed
+     * target account, or ownership that moved while the request was in flight.
+     */
+    @ExceptionHandler(OwnershipTransferConflictException::class)
+    fun handleOwnershipTransferConflict(ex: OwnershipTransferConflictException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "Ownership transfer failed"
+        }
+
+    /**
+     * The caller still owns organizations. The blocking organizations are listed so the
+     * client can say which ones need handing over, rather than making the user hunt.
+     * Safe to enumerate: the caller owns every one of them.
+     */
+    @ExceptionHandler(AccountClosureBlockedException::class)
+    fun handleAccountClosureBlocked(ex: AccountClosureBlockedException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.message).apply {
+            title = "Account still owns organizations"
+            setProperty("organizations", ex.organizations.map { mapOf("id" to it.id, "name" to it.name) })
         }
 
     /**

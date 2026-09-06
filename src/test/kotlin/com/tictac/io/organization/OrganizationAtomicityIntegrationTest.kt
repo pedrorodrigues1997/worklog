@@ -5,6 +5,7 @@ import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
+import org.mockito.kotlin.argThat
 import org.mockito.kotlin.doThrow
 import org.mockito.kotlin.whenever
 import org.springframework.dao.DataIntegrityViolationException
@@ -12,6 +13,8 @@ import org.springframework.test.context.bean.override.mockito.MockitoSpyBean
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 
 /**
+ * The two multi-statement writes in this domain, and the guarantee that each is all-or-nothing.
+ *
  * Organization creation is two INSERTs, and either both land or neither does.
  *
  * The half that matters is "organization without an owner": nobody could ever be granted a
@@ -25,8 +28,8 @@ import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
  * behaviour is a property of the transaction boundary, and nothing that shares a context
  * can force the second statement to fail.
  */
-@DisplayName("Organization creation is atomic")
-class OrganizationCreationAtomicityIntegrationTest : OrganizationApiTest() {
+@DisplayName("Organization writes are atomic")
+class OrganizationAtomicityIntegrationTest : OrganizationApiTest() {
 
     @MockitoSpyBean
     private lateinit var memberRepositorySpy: OrganizationMemberRepository
@@ -48,6 +51,37 @@ class OrganizationCreationAtomicityIntegrationTest : OrganizationApiTest() {
 
         // ...and the caller is left with nothing dangling.
         assertThat(organizationMemberRepository.findOrganizationsForUser(pedro.id)).isEmpty()
+    }
+
+    @Test
+    fun `a failure promoting the new owner rolls the demotion back`() {
+        val owner = newUser("owner@example.com")
+        val target = newUser("target@example.com")
+        val organizationId = createOrganization(owner, "Acme")
+        organizationMemberRepository.saveAndFlush(
+            OrganizationMember(organizationId, target.id, OrganizationRole.MEMBER),
+        )
+
+        // Transfer writes the demote first and the promote second - the order the partial
+        // unique index requires. Fail only the promote, matched on whose row it is; the
+        // demote is left unstubbed and so runs for real. That puts the failure exactly in
+        // the window where the organization has no owner at all.
+        doThrow(DataIntegrityViolationException("promote failed"))
+            .whenever(memberRepositorySpy)
+            .saveAndFlush(argThat<OrganizationMember> { userId == target.id })
+
+        postJson(
+            "/api/organizations/$organizationId/transfer-ownership",
+            """{"userId":"${target.id}"}""",
+            owner.accessToken,
+        ).andExpect(status().is5xxServerError)
+
+        // The demotion had already reached the database. If it were not rolled back, this
+        // organization would now have zero owners and be impossible to administer.
+        assertThat(roleOf(organizationId, owner)).isEqualTo(OrganizationRole.OWNER)
+        assertThat(roleOf(organizationId, target)).isEqualTo(OrganizationRole.MEMBER)
+        assertThat(organizationMemberRepository.countByOrganizationIdAndRole(organizationId, OrganizationRole.OWNER))
+            .isEqualTo(1)
     }
 
     @Test

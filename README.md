@@ -443,6 +443,7 @@ endpoint that lists organizations globally.
 | `GET`    | `/api/organizations/{id}/members`               | any member             |
 | `PATCH`  | `/api/organizations/{id}/members/{userId}`      | `OWNER`, `ADMIN`       |
 | `DELETE` | `/api/organizations/{id}/members/{userId}`      | `OWNER`, `ADMIN`       |
+| `POST`   | `/api/organizations/{id}/transfer-ownership`    | `OWNER`                |
 
 ### Example
 
@@ -525,6 +526,52 @@ for whether that tenant exists. A caller who *is* a member but holds the wrong r
 `403`: they can already see the organization in their own listing, so saying so costs
 nothing.
 
+### Ownership transfer
+
+Ownership moves through one named operation and nowhere else. The membership API refuses to
+assign or revoke `OWNER` precisely so that this is the only route to it — a transfer touches
+two members at once, and expressing it as two role edits is how an organization ends up with
+two owners or none.
+
+```bash
+# OWNER only. The target must already be a member of this organization.
+curl -X POST http://localhost:8080/api/organizations/$ORG_ID/transfer-ownership \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"userId":"22ae501a-3589-44cc-805e-64cefa4e9d03"}'
+```
+
+```json
+{
+  "organizationId": "7def7001-...",
+  "previousOwner": { "userId": "48106a97-...", "email": "pedro@example.com", "role": "ADMIN" },
+  "newOwner":      { "userId": "22ae501a-...", "email": "john@example.com",  "role": "OWNER" }
+}
+```
+
+The outgoing owner becomes `ADMIN`, not `MEMBER` — a handover should not also strip the
+person who built the organization of the ability to run it.
+
+| Situation | Response |
+| --- | --- |
+| caller is `ADMIN` or `MEMBER` | `403` |
+| caller is not a member | `404` |
+| target is not a member of this organization | `404` |
+| target user does not exist | `404` |
+| target's account is closed | `409` |
+| target is the caller | `400` |
+| ownership moved while the request was in flight | `409` |
+
+Identification is by user id, never by email: an email would let a caller test which
+addresses have accounts, and bringing a new person in is an invitation, not a transfer.
+
+**Concurrency.** Two transfers of the same organization serialise on a `SELECT … FOR UPDATE`
+of its `OWNER` row. The loser blocks; when it resumes, the row it was waiting on no longer
+matches `role = 'OWNER'`, so it finds no owner to demote and fails with `409` rather than
+racing to a second owner. Inside the transaction the demote is written *before* the promote,
+because the partial unique index permits one `OWNER` row per organization at any instant —
+promoting first would violate it on every transfer. The intermediate zero-owner state exists
+only inside that transaction and no other session can observe it.
+
 ### Deletion
 
 `DELETE` is a soft delete: it stamps `deleted_at` and nothing else. Memberships survive, and
@@ -540,6 +587,51 @@ invitation. There is deliberately no "add this email to my organization" endpoin
 would attach a stranger's account to a tenant without their consent. Invitations get their
 own table and flow; nothing in the membership model needs to change to accommodate them.
 
+## Closing an account
+
+```
+DELETE /api/users/me      → 204
+```
+
+Soft delete, consistent with the rest of the model: `users.deleted_at` is stamped and the row
+stays. Login, the OAuth paths, `ActiveUser.require()` and the organization member listing all
+already treat that as gone. Refresh tokens are revoked in the same transaction — `rotate()`
+looks a token up and never consults the user row, so a live refresh token would otherwise
+keep minting access tokens for a closed account indefinitely.
+
+**You cannot close an account that still owns an organization.**
+
+```json
+{
+  "status": 409,
+  "title": "Account still owns organizations",
+  "detail": "Transfer ownership of your organizations before closing your account",
+  "instance": "/api/users/me",
+  "organizations": [{ "id": "7def7001-...", "name": "Acme Consulting" }]
+}
+```
+
+The lifecycle is therefore: **transfer ownership → then close.** Every alternative was worse.
+Promoting some other member is a decision the API has no basis to make; deleting the
+organization destroys a business's data as a side effect of one person leaving; and dropping
+the `OWNER` membership silently leaves an active organization nobody can administer and
+nobody can be granted a role in — because granting a role requires already being a member.
+
+Owning a *soft-deleted* organization does not block closure. That organization is already
+unreachable, and requiring a transfer would be a dead end since transfer refuses deleted
+organizations too.
+
+**Non-owner memberships survive closure.** A closed `MEMBER` or `ADMIN` keeps their
+`organization_members` row. The row is already inert — the account cannot authenticate, and
+closed accounts are filtered out of every member listing — so deleting it would destroy the
+record of who was in an organization to no observable benefit, and soft-deleting it would
+mean inventing a whole membership lifecycle for a state nothing can see. The one cost is that
+an organization's member count and its `organization_members` row count can differ; that
+matters when seats are billed, where the fix is to count through `users.deleted_at`.
+
+The invariant all of this protects: **an active organization is never owned by a closed
+account.**
+
 ## Layout
 
 Code is organised by business domain, not by technical layer:
@@ -549,7 +641,7 @@ com.tictac.io
 ├── common/          API error handling
 │   ├── security/    CurrentUser
 │   └── ratelimit/   throttling for the auth endpoints
-├── user/            the user entity, ActiveUser, GET /api/users/me
+├── user/            the user entity, ActiveUser, GET/DELETE /api/users/me
 ├── organization/    organizations, memberships, roles, tenant-scoped authorization
 └── authentication/  registration, login, refresh, logout, HTTP security
     ├── token/       JWT issuing/decoding, refresh-token state and cleanup
