@@ -1,0 +1,67 @@
+package com.tictac.io.organization
+
+import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Query
+import org.springframework.data.repository.query.Param
+import java.util.UUID
+
+interface OrganizationMemberRepository : JpaRepository<OrganizationMember, UUID> {
+
+    /**
+     * The tenant-isolation lookup. Everything organization-scoped goes through this, via
+     * [OrganizationAccess] - a null result means the caller is a stranger to that
+     * organization, whatever id they supplied.
+     */
+    fun findByOrganizationIdAndUserId(organizationId: UUID, userId: UUID): OrganizationMember?
+
+    fun countByOrganizationIdAndRole(organizationId: UUID, role: OrganizationRole): Long
+
+    /**
+     * The caller's organizations, with the role they hold in each.
+     *
+     * A theta join rather than an association walk, because [OrganizationMember] holds
+     * plain ids by design. Soft-deleted organizations are filtered out here: a listing is
+     * the one place a deleted tenant would otherwise still be visible.
+     *
+     * The projection is built straight into the response DTO. Copying it through an
+     * identical intermediate type would only add a mapping step with nothing to decide,
+     * and Hibernate validates the constructor expression at startup, so a DTO change that
+     * breaks this query fails the build rather than a request.
+     */
+    @Query(
+        """
+        SELECT new com.tictac.io.organization.OrganizationResponse(o.id, o.name, m.role, o.createdAt)
+        FROM OrganizationMember m, Organization o
+        WHERE o.id = m.organizationId
+          AND m.userId = :userId
+          AND o.deletedAt IS NULL
+        ORDER BY o.createdAt ASC
+        """,
+    )
+    fun findOrganizationsForUser(@Param("userId") userId: UUID): List<OrganizationResponse>
+
+    /**
+     * Members of one organization, joined to the user rows for the display fields. Only
+     * the four safe columns are selected; there is no query path here that could return a
+     * password hash even by accident.
+     *
+     * Closed accounts are excluded. A soft-deleted user cannot authenticate, so listing
+     * them as members would publish the email address of an account that no longer exists.
+     *
+     * Callers must already have been authorised for [organizationId] - this method does
+     * not check membership, which is exactly why it is never called from a controller.
+     */
+    @Query(
+        """
+        SELECT new com.tictac.io.organization.OrganizationMemberResponse(
+            u.id, u.firstName, u.lastName, u.email, m.role, m.createdAt
+        )
+        FROM OrganizationMember m, com.tictac.io.user.User u
+        WHERE u.id = m.userId
+          AND m.organizationId = :organizationId
+          AND u.deletedAt IS NULL
+        ORDER BY m.createdAt ASC
+        """,
+    )
+    fun findMembersOfOrganization(@Param("organizationId") organizationId: UUID): List<OrganizationMemberResponse>
+}

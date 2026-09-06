@@ -6,6 +6,8 @@ import com.tictac.io.authentication.oauth.InvalidLoginCodeException
 import com.tictac.io.authentication.oauth.InvalidOAuthIdentityException
 import com.tictac.io.authentication.oauth.OAuthLinkingNotAllowedException
 import com.tictac.io.authentication.token.InvalidRefreshTokenException
+import com.tictac.io.organization.OrganizationMemberNotFoundException
+import com.tictac.io.organization.OrganizationNotFoundException
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
@@ -95,8 +97,30 @@ class ApiExceptionHandler : ResponseEntityExceptionHandler() {
         }
 
     /**
+     * The caller is not a member of that organization - or it does not exist, or it has
+     * been soft-deleted. One response for all three: see OrganizationNotFoundException for
+     * why distinguishing them would turn a leaked id into an existence oracle.
+     */
+    @ExceptionHandler(OrganizationNotFoundException::class)
+    fun handleOrganizationNotFound(ex: OrganizationNotFoundException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.message).apply {
+            title = "Organization not found"
+        }
+
+    /**
+     * The caller is already authorised for the organization and the *target* member is
+     * missing, so this reveals nothing they could not see in the member list.
+     */
+    @ExceptionHandler(OrganizationMemberNotFoundException::class)
+    fun handleOrganizationMemberNotFound(ex: OrganizationMemberNotFoundException): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.message).apply {
+            title = "Member not found"
+        }
+
+    /**
      * Declared explicitly so the catch-all below cannot turn an authorisation failure
-     * into a 500. This becomes load-bearing once tenant-scoped authorisation lands.
+     * into a 500. Load-bearing now that organization roles are enforced: a member
+     * attempting an administrative operation lands here.
      */
     @ExceptionHandler(AccessDeniedException::class)
     fun handleAccessDenied(ex: AccessDeniedException): ProblemDetail =

@@ -50,6 +50,11 @@ com.tictac.io
 │   ├── ActiveUser.kt               resolves the token to a live account
 │   ├── EmailNormalization.kt       shared by registration and login
 │   └── CurrentUserController.kt    GET /api/users/me
+├── organization/
+│   ├── Organization*.kt            entity, repository, DTOs, controllers
+│   ├── OrganizationRole.kt         OWNER/ADMIN/MEMBER + the whole membership policy
+│   ├── OrganizationAccess.kt       THE tenant-scoped authorisation gate
+│   └── Organization*Service.kt     creation, settings, membership management
 └── authentication/
     ├── SecurityConfig.kt           two filter chains (public POSTs, default-deny)
     ├── PasswordEncoderConfig.kt
@@ -73,10 +78,14 @@ anything, and startup fails if a mapping and a migration have drifted apart.
 | `refresh_tokens` | server-side refresh state: `token_hash`, `expires_at`, `revoked_at`, `replaced_by_id` |
 | `user_identities` | `(user_id, provider, provider_user_id)` — external logins |
 | `oauth_login_codes` | single-use codes handing an OAuth sign-in to the frontend |
+| `organizations` | `organization_id`, `organization_name`, `created_at`, `deleted_at` (soft delete) |
+| `organization_members` | `(organization_id, user_id)` unique, `role`; one OWNER per org via a partial unique index |
 
-Designed but **not yet implemented**: `organizations`, `organization_members`,
-`subscriptions`. The agreed DBML for those lives in the product brief; treat it as the
-source of truth and do not redesign it.
+Designed but **not yet implemented**: `subscriptions`. The agreed DBML for it lives in the
+product brief; treat it as the source of truth and do not redesign it. The organization
+tables follow that DBML's column names (`organization_id`, `organization_name`) rather than
+the `id`/`name` shorthand `users` uses — the entity maps them back, so the
+inconsistency stops at the schema boundary.
 
 Conventions: UUID primary keys via `@GeneratedValue(strategy = GenerationType.UUID)`;
 `timestamptz` (not `timestamp`) because the product is global; `varchar` lengths declared in
@@ -160,6 +169,20 @@ them fail, the change is wrong, not the test.
 9. **Redirect URIs come from configuration, never the request** — otherwise open redirect.
 10. **`saveAndFlush`, not `save`,** wherever a unique-constraint violation must be catchable
     inside the method rather than at commit.
+11. **Every organisation-scoped operation opens with `OrganizationAccess.require(...)`.** The
+    organisation id comes from the URL and is untrusted; it is safe only because it is used
+    as one half of a membership lookup whose other half comes from the token. Nothing else
+    queries by organisation id — an endpoint that forgets the gate is a
+    cross-tenant leak, and one unforgettable place beats a check copied into every controller.
+12. **A non-member gets 404, a member with the wrong role gets 403.** Ids travel; a 403/404
+    split would turn a leaked organisation id into an existence oracle for that tenant. A
+    member already knows the organisation exists, so 403 there costs nothing.
+13. **Creating an organisation and its OWNER membership is one transaction.** An organisation
+    with no owner is unfixable through the API — granting a role requires
+    already being a member of it.
+14. **`OrganizationRole.outranks` / `canAssign` are the entire membership policy.** No role
+    outranks itself or the OWNER, and OWNER is never assignable; that is what makes
+    self-promotion, admin-on-admin action and an ownerless organisation all fail closed.
 
 ### OAuth flow, in one picture
 
@@ -201,18 +224,21 @@ must be the `jdbc:postgresql://…` form.
 docker compose up -d                 # PostgreSQL 17 on :5432
 set -a; source .env; set +a
 ./mvnw spring-boot:run
-./mvnw clean verify                  # 132 tests; Docker must be running
+./mvnw clean verify                  # 218 tests; Docker must be running
 ```
 
 - **Real PostgreSQL via Testcontainers.** No in-memory substitute — it would not catch a
   mismatch between a migration and a mapping.
 - `PostgresIntegrationTest` is the base: `@SpringBootTest` + MockMvc + container, and a
-  `@BeforeEach` that clears all four tables children-first. `AuthenticatedApiTest` extends it
+  `@BeforeEach` that clears all six tables children-first. `AuthenticatedApiTest` extends it
   with register/login helpers that go through the **real** endpoints and filter chain.
 - All base-derived tests share one Spring context (and one container). A test that overrides
   properties gets its own context and its own container — currently
-  `RateLimitedAuthenticationIntegrationTest` and `OAuth2ProviderWiringIntegrationTest`. Both
-  earn it: they prove filter/bean wiring that unit tests cannot.
+  `RateLimitedAuthenticationIntegrationTest`, `OAuth2ProviderWiringIntegrationTest` and
+  `OrganizationCreationAtomicityIntegrationTest` (a `@MockitoSpyBean`). All three earn it:
+  they prove wiring or transaction behaviour that unit tests cannot.
+- `OrganizationApiTest` extends `AuthenticatedApiTest` with organisation helpers and adds no
+  bean overrides, so the organisation tests stay in the shared context.
 - **Never mock away Spring Security** for authentication tests.
 - The external provider is stubbed at the `OidcUser` / `OAuth2AuthenticationToken` boundary —
   i.e. from verified claims onward. Nothing contacts Google.
@@ -263,9 +289,12 @@ Spring Boot 4 / Kotlin specifics, all discovered the hard way:
 
 Do not add these speculatively; each is its own task.
 
-Organisations · memberships · roles and permissions · subscriptions · Stripe · seats and
-licensing · projects · clients · tasks · time entries · reports · CSV export · email sending
-(Resend) · **CORS** · frontend code of any kind.
+Subscriptions · Stripe · seats and licensing · projects · clients · tasks · time entries ·
+reports · CSV export · email sending (Resend) · **CORS** · frontend code of any kind.
+
+Organisations, memberships and organisation roles now exist (see the invariants in §5).
+What is *not* built on top of them: invitations, ownership transfer, leaving an
+organisation, per-project membership, and any permission model finer than the three roles.
 
 Known open items in what *is* built:
 
@@ -282,6 +311,15 @@ Known open items in what *is* built:
 - UUIDv4 primary keys are random, which hurts index locality. Irrelevant for `users`; decide
   before `time_entries`, where the row count will actually live.
 - OAuth-created users can have a blank `last_name` if Google returns no family name.
+- No invitations, so the only way into an organisation is founding one. Membership rows for
+  anyone else currently have to be seeded directly (the tests do this deliberately).
+- No ownership transfer, and therefore no way to hand over or leave an organisation as its
+  owner. OWNER is unassignable and unremovable on purpose until that operation exists.
+- Deleting a user account does not touch their memberships; an organisation could in
+  principle be owned by a closed account. Closed accounts are filtered out of member
+  listings, which would make such an owner invisible. Decide this alongside account deletion.
+- Organisation soft delete leaves everything else in place, including memberships. There is
+  no restore and no purge.
 - `logging` never contains passwords, hashes or tokens. Keep it that way.
 
 ---

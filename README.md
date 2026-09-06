@@ -419,6 +419,127 @@ effective limit multiplies by the instance count and resets on deploy. Edge prot
 `RATE_LIMIT_CLIENT_IP_HEADER` to a header the edge **overwrites** (`CF-Connecting-IP`) —
 never `X-Forwarded-For`, which a caller can prepend to and earn a fresh bucket per request.
 
+## Organizations
+
+The customer is the organization, not the individual. A user reaches organization data only
+through a membership, and a user may belong to several organizations with a different role
+in each — so nothing about the current tenant is ever read off the user row.
+
+```
+users  ──<  organization_members  >──  organizations
+                     role
+```
+
+Every endpoint below requires a valid access token. There is no anonymous access and no
+endpoint that lists organizations globally.
+
+| Method   | Path                                            | Who may call it        |
+| -------- | ----------------------------------------------- | ---------------------- |
+| `POST`   | `/api/organizations`                            | any authenticated user |
+| `GET`    | `/api/organizations`                            | any authenticated user |
+| `GET`    | `/api/organizations/{id}`                       | any member             |
+| `PATCH`  | `/api/organizations/{id}`                       | `OWNER`, `ADMIN`       |
+| `DELETE` | `/api/organizations/{id}`                       | `OWNER`                |
+| `GET`    | `/api/organizations/{id}/members`               | any member             |
+| `PATCH`  | `/api/organizations/{id}/members/{userId}`      | `OWNER`, `ADMIN`       |
+| `DELETE` | `/api/organizations/{id}/members/{userId}`      | `OWNER`, `ADMIN`       |
+
+### Example
+
+```bash
+TOKEN=...   # accessToken from POST /api/auth/login
+
+# Create an organization. The caller becomes its OWNER; there is no way to create one
+# owned by somebody else, and no userId field is read from the body.
+curl -X POST http://localhost:8080/api/organizations \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"Acme Consulting"}'
+# {"id":"9288...","name":"Acme Consulting","role":"OWNER","createdAt":"2026-09-06T07:46:42Z"}
+
+# The organizations you belong to, with your role in each.
+curl http://localhost:8080/api/organizations -H "Authorization: Bearer $TOKEN"
+# [{"id":"9288...","name":"Acme Consulting","role":"OWNER","createdAt":"..."}]
+
+# Members. Safe fields only — no password hash, ever.
+curl http://localhost:8080/api/organizations/$ORG_ID/members -H "Authorization: Bearer $TOKEN"
+# [{"userId":"f32f...","firstName":"Pedro","lastName":"Rodrigues",
+#   "email":"pedro@example.com","role":"OWNER","joinedAt":"..."}]
+
+# Promote a member.
+curl -X PATCH http://localhost:8080/api/organizations/$ORG_ID/members/$USER_ID \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"role":"ADMIN"}'
+```
+
+### Roles
+
+`OWNER` · `ADMIN` · `MEMBER`, ranked in that order. Two rules cover the whole membership
+policy, and both live on `OrganizationRole` rather than being spelled out per endpoint:
+
+- **You may only act on someone you outrank.** An `ADMIN` may manage `MEMBER`s but not a
+  fellow `ADMIN`; nobody outranks the `OWNER`, and no role outranks itself. That single rule
+  is what keeps an organization from being left ownerless — the owner can be neither removed
+  nor demoted, by an admin or by themselves.
+- **You may only hand out a role at or below your own, and never `OWNER`.** An `ADMIN` can
+  promote a `MEMBER` to `ADMIN`; nobody can create a second owner. Transferring ownership
+  has to demote the current owner in the same step, so it belongs in its own operation and
+  is not implemented yet.
+
+There is exactly one `OWNER` per organization, enforced by a partial unique index rather
+than by application code alone.
+
+### Tenant isolation
+
+Authentication answers *who is this?*; authorization answers *may they operate on this
+organization?* They are separate checks, and the second one is not optional.
+
+The organization id comes from the URL — the frontend has to be able to choose which tenant
+it is working in — and is therefore untrusted. What makes it safe is that it is only ever
+used as one half of a membership lookup whose other half comes from the access token:
+
+```
+access token → user id ─┐
+                        ├─→ organization_members → role → allowed?
+organization id (URL) ──┘
+```
+
+Every organization-scoped service method opens with `OrganizationAccess.require(...)`,
+optionally naming the roles that may proceed. Nothing else queries by organization id:
+
+```kotlin
+// any member may read
+val context = organizationAccess.require(organizationId)
+
+// administrative operations name the roles that may proceed
+val context = organizationAccess.require(organizationId, OrganizationRole.OWNER, OrganizationRole.ADMIN)
+```
+
+Add new organization-scoped endpoints the same way. A route that queries by organization id
+without going through that gate is a cross-tenant data leak, which is why the check lives in
+one place instead of being copied into every controller.
+
+**Failures are deliberately shaped.** A caller who is *not* a member gets `404`, identical
+whether the organization is real, soft-deleted, or imaginary — organization ids travel in
+URLs and support tickets, and a `403`/`404` split would turn any leaked id into an oracle
+for whether that tenant exists. A caller who *is* a member but holds the wrong role gets
+`403`: they can already see the organization in their own listing, so saying so costs
+nothing.
+
+### Deletion
+
+`DELETE` is a soft delete: it stamps `deleted_at` and nothing else. Memberships survive, and
+so will the clients, projects and time entries that eventually hang off an organization —
+destroying a customer's data on one API call is not recoverable. A soft-deleted organization
+drops out of every listing and is refused by `OrganizationAccess`, so it is unreachable to
+everyone including its owner. Purging and restoring are separate deliberate operations.
+
+### Joining an organization
+
+Only two things create a membership: founding an organization, and (later) accepting an
+invitation. There is deliberately no "add this email to my organization" endpoint — that
+would attach a stranger's account to a tenant without their consent. Invitations get their
+own table and flow; nothing in the membership model needs to change to accommodate them.
+
 ## Layout
 
 Code is organised by business domain, not by technical layer:
@@ -429,6 +550,7 @@ com.tictac.io
 │   ├── security/    CurrentUser
 │   └── ratelimit/   throttling for the auth endpoints
 ├── user/            the user entity, ActiveUser, GET /api/users/me
+├── organization/    organizations, memberships, roles, tenant-scoped authorization
 └── authentication/  registration, login, refresh, logout, HTTP security
     ├── token/       JWT issuing/decoding, refresh-token state and cleanup
     └── oauth/       Google registration, identity linking, sign-in handoff

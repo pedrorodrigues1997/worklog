@@ -4,6 +4,9 @@ import com.jayway.jsonpath.JsonPath
 import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
 import org.springframework.test.web.servlet.ResultActions
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 import java.util.UUID
@@ -52,6 +55,24 @@ abstract class AuthenticatedApiTest : PostgresIntegrationTest() {
 
     protected fun postJson(path: String, body: String, accessToken: String? = null): ResultActions {
         val request = post(path).contentType(MediaType.APPLICATION_JSON).content(body)
+        accessToken?.let { request.header(HttpHeaders.AUTHORIZATION, "Bearer $it") }
+        return mockMvc.perform(request)
+    }
+
+    protected fun patchJson(path: String, body: String, accessToken: String? = null): ResultActions {
+        val request = patch(path).contentType(MediaType.APPLICATION_JSON).content(body)
+        accessToken?.let { request.header(HttpHeaders.AUTHORIZATION, "Bearer $it") }
+        return mockMvc.perform(request)
+    }
+
+    protected fun getRequest(path: String, accessToken: String? = null): ResultActions {
+        val request = get(path)
+        accessToken?.let { request.header(HttpHeaders.AUTHORIZATION, "Bearer $it") }
+        return mockMvc.perform(request)
+    }
+
+    protected fun deleteRequest(path: String, accessToken: String? = null): ResultActions {
+        val request = delete(path)
         accessToken?.let { request.header(HttpHeaders.AUTHORIZATION, "Bearer $it") }
         return mockMvc.perform(request)
     }
